@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>AstralDivide</AssemblyName>
+    <RootNamespace>AstralDivide</RootNamespace>
+    <Version>0.1.0</Version>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+
+    <!-- 本机 SPT 服务端目录; 外部构建用 dotnet build -p:SptDir=<路径> 覆写 -->
+    <SptDir Condition="'$(SptDir)' == ''">D:\SPT\SPT_Runtime</SptDir>
+    <ModRoot>$(MSBuildProjectDirectory)\..</ModRoot>
+    <ModDir>$(SptDir)\user\mods\AstralDivide</ModDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Reference Include="SPTarkov.Server.Core" HintPath="$(SptDir)\SPTarkov.Server.Core.dll" Private="false" />
+    <Reference Include="SPTarkov.DI" HintPath="$(SptDir)\SPTarkov.DI.dll" Private="false" />
+    <Reference Include="SPTarkov.Common" HintPath="$(SptDir)\SPTarkov.Common.dll" Private="false" />
+    <Reference Include="SemanticVersioning" HintPath="$(SptDir)\SemanticVersioning.dll" Private="false" />
+    <Reference Include="WTT-ServerCommonLib" HintPath="$(SptDir)\user\mods\WTT-ServerCommonLib\WTT-ServerCommonLib.dll" Private="false" />
+  </ItemGroup>
+
+  <!--
+    编译后自动部署。bundles 有 200MB+，SkipUnchangedFiles 让第二次以后只拷改动过的，
+    否则每次编译都要搬两百兆。
+  -->
+  <Target Name="Deploy" AfterTargets="Build">
+    <ItemGroup>
+      <DbFiles Include="$(ModRoot)\db\**\*.*" />
+      <BundleFiles Include="$(ModRoot)\bundles\**\*.*" />
+      <ResFiles Include="$(ModRoot)\res\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModDir)" />
+    <Copy SourceFiles="$(ModRoot)\LICENSE;$(ModRoot)\NOTICE.txt" DestinationFolder="$(ModDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ModRoot)\bundles.json" DestinationFolder="$(ModDir)"
+          Condition="Exists('$(ModRoot)\bundles.json')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(DbFiles)"     DestinationFolder="$(ModDir)\db\%(RecursiveDir)"      SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(BundleFiles)" DestinationFolder="$(ModDir)\bundles\%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(ResFiles)"    DestinationFolder="$(ModDir)\res\%(RecursiveDir)"     SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="已部署: AstralDivide -> $(ModDir)" />
+  </Target>
+
+</Project>

@@ -1,0 +1,42 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>AstralDivide.Client</AssemblyName>
+    <RootNamespace>AstralDivide.Client</RootNamespace>
+    <Version>0.1.0</Version>
+    <!-- 本机 SPT 安装目录; 外部构建用 dotnet build -p:EftDir=<路径> 覆写 -->
+    <EftDir Condition="'$(EftDir)' == ''">D:\SPT</EftDir>
+    <Managed>$(EftDir)\EscapeFromTarkov_Data\Managed</Managed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx" HintPath="$(EftDir)\BepInEx\core\BepInEx.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(EftDir)\BepInEx\core\0Harmony.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(Managed)\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(Managed)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.ImageConversionModule" HintPath="$(Managed)\UnityEngine.ImageConversionModule.dll" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(Managed)\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(Managed)\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="Newtonsoft.Json" HintPath="$(Managed)\Newtonsoft.Json.dll" Private="false" />
+    <Reference Include="Comfort" HintPath="$(Managed)\Comfort.dll" Private="false" />
+    <Reference Include="Sirenix.Serialization" HintPath="$(Managed)\Sirenix.Serialization.dll" Private="false" /> <!-- PlayerModelView : SerializedMonoBehaviour，PlayerGate 要按它判「预览人物」 -->
+  </ItemGroup>
+
+  <!--
+    编译后自动部署。以前这个项目**没有部署步骤**，全靠手动拷 —— 2026-08-23 因此白测一轮
+    （编译成功、日志没报错，但游戏加载的还是上一版 DLL，F12 里根本看不到新开关）。
+    ⚠️ 游戏在跑时 DLL 被锁，拷不进去会直接报错 —— 这是故意的，宁可编译失败也别让人以为部署成功了。
+  -->
+  <Target Name="Deploy" AfterTargets="Build">
+    <PropertyGroup>
+      <PluginDir>$(EftDir)\BepInEx\plugins\AstralDivide</PluginDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(PluginDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PluginDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LICENSE;$(MSBuildProjectDirectory)\..\NOTICE.txt" DestinationFolder="$(PluginDir)" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="已部署: $(AssemblyName).dll -> $(PluginDir)" />
+  </Target>
+
+</Project>

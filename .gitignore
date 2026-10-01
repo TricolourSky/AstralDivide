@@ -1,0 +1,18 @@
+# Only the code and the license files belong in this repository.
+# Everything else in the working folder (model bundles, trader data, tools, notes) stays local.
+/*
+!/.gitignore
+!/README.md
+!/README.zh-CN.md
+!/LICENSE
+!/NOTICE.txt
+!/BinaryDimensionStore.slnx
+!/src/
+!/client/
+
+# Build output
+bin/
+obj/
+
+# Not code: clothing thumbnails ship in the release archive
+/client/icons/

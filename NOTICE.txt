@@ -1,0 +1,42 @@
+AstralDivide
+Copyright (C) 2026 TricolourSky
+
+Source code: https://github.com/TricolourSky/AstralDivide
+
+
+CODE
+
+The code of AstralDivide (the server mod AstralDivide.dll and the client plugin
+AstralDivide.Client.dll) is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License, version 3, as published by
+the Free Software Foundation.
+
+It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See the file LICENSE for the full text of the license.
+
+
+IMAGES AND STORY
+
+The following works made by the author are (C) TricolourSky and are licensed
+under Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International
+(CC BY-NC-ND 4.0): https://creativecommons.org/licenses/by-nc-nd/4.0/
+
+  - the images: the trader portrait, the story scene backgrounds and video,
+    the chapter banner and icon;
+  - the story chapter: the dialogue scripts (.dlg) and the quest files with
+    their texts.
+
+They are not covered by the GNU General Public License.
+
+
+CHARACTER MODELS AND CLOTHING THUMBNAILS
+
+The MMD character models packed in the .bundle files (bundles\clothing and
+bundles\heads) come from Girls' Frontline 2: Exilium. The characters, models and
+textures, and the clothing thumbnails (icons\*.png), belong to their copyright
+holder (Sunborn). They are not covered by the GNU General Public License or by
+the Creative Commons license above.
+
+AstralDivide is a non-commercial fan work. It is not affiliated with or endorsed
+by Sunborn, Battlestate Games or the SPT team.
