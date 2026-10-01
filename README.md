@@ -38,7 +38,7 @@ Requirements:
 |---|---|---|
 | SPT | 4.1.x | |
 | WTT-CommonLib | 3.0.x | Registers the clothing, heads and bundles. The server will not load AstralDivide without it. |
-| [VisitAPI](https://github.com/TricolourSky/VisitAPI) | 1.3.5 or newer | Runs the story chapter. Without it SORA stays locked. |
+| [VisitAPI](https://github.com/TricolourSky/VisitAPI) | [1.3.5](https://github.com/TricolourSky/VisitAPI/releases/download/V1.3.5/VisitAPI-1.3.5.zip) or newer | Runs the story chapter. Without it SORA stays locked. |
 | Black Division | current version | Optional. Provides the enemies of one night encounter. |
 
 ## Building from source

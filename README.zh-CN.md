@@ -38,7 +38,7 @@ SORA，一位来自 Astral Divide 的狐耳商人，带着七套「像在 MMD �
 |---|---|---|
 | SPT | 4.1.x | |
 | WTT-CommonLib | 3.0.x | 注册服装、头部和资源包。没有它，服务端不会加载 AstralDivide。 |
-| [VisitAPI](https://github.com/TricolourSky/VisitAPI) | 1.3.5 或更新 | 运行剧情章节。没有它，SORA 一直是锁着的。 |
+| [VisitAPI](https://github.com/TricolourSky/VisitAPI) | [1.3.5](https://github.com/TricolourSky/VisitAPI/releases/download/V1.3.5/VisitAPI-1.3.5.zip) 或更新 | 运行剧情章节。没有它，SORA 一直是锁着的。 |
 | Black Division | 当前版本 | 可选。提供一场夜间遭遇战的敌人。 |
 
 ## 从源码编译
