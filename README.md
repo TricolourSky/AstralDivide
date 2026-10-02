@@ -47,7 +47,9 @@ You need:
 
 - the .NET 10 SDK;
 - the .NET Framework 4.7.2 targeting pack (Developer Pack), for the client plugin;
-- an SPT 4.1.x installation with WTT-CommonLib installed. The projects reference its assemblies; nothing from the game is in this repository.
+- an SPT 4.1.x installation. The client project references the game's and BepInEx's assemblies from it; nothing from the game is in this repository.
+
+The server project does not use the installation to compile. It builds against the official `SPTarkov.*` 4.1.0 and `WTT-ServerCommonLib` 3.0.0 NuGet packages, the lowest versions the mod supports, so that the DLL loads on every 4.1.x server. `SptDir` only tells it where to install the result.
 
 Below, `<SPT>` is your SPT folder, the one that contains `EscapeFromTarkov.exe`.
 

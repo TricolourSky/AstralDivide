@@ -47,7 +47,9 @@ SORA，一位来自 Astral Divide 的狐耳商人，带着七套「像在 MMD �
 
 - .NET 10 SDK；
 - .NET Framework 4.7.2 目标包（Developer Pack），客户端插件要用；
-- 一份装好了 WTT-CommonLib 的 SPT 4.1.x。工程引用的是它里面的程序集，仓库里不含任何游戏文件。
+- 一份 SPT 4.1.x。客户端工程引用的是它里面游戏和 BepInEx 的程序集，仓库里不含任何游戏文件。
+
+服务端工程编译时不用这份安装：它按官方 NuGet 包 `SPTarkov.*` 4.1.0 和 `WTT-ServerCommonLib` 3.0.0 编译，也就是本模组支持的最低版本，这样编出来的 DLL 在所有 4.1.x 服务端上都能加载。`SptDir` 只决定编完装到哪里。
 
 下面的 `<SPT>` 指你的 SPT 游戏目录，也就是有 `EscapeFromTarkov.exe` 的那个文件夹。
 
