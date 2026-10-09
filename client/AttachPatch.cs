@@ -253,9 +253,13 @@ internal static class AttachPatch
                 return;
             leafIndex.TryGetValue("Base HumanPelvis", out Transform reference);
             MmdRig rig = RigRegistry.Get(skeleton, model);
-            rig.AddPart((int)part.Key, survey, used, reference ?? chains[0].Attach, key);
+            List<ClothSway.Input> sway = SwayInputs(model, chains, (int)part.Key);
+            ClothSway.Body legs = sway.Count > 0 ? SwayBody(leafIndex, lookup) : null;
+            rig.AddPart((int)part.Key, survey, used, reference ?? chains[0].Attach, key, sway, legs);
+#if SORA_DEV
             if (PlayerGate.IsLocal(__instance))
-                TuneUI.Follow(model.Name);          // 调参台跟着你身上穿的这套走
+                TuneUI.Follow(model.Name);          // 调参台跟着你身上穿的这套走（开发版才有调参台，37.29）
+#endif
         }
         catch (Exception e)
         {
@@ -312,19 +316,81 @@ internal static class AttachPatch
         return new Grafted
         {
             Bones = bones,
+            Names = chain.bones.ToArray(),
             Root = bones[0],
             Attach = attach,
+            RestRoot = bones[0].position,                    // 还没嫁接：骨在服装 prefab 的静止骨架里（新做法定方位用，37.31）
             // 用 prefab 自带的同名骨算绑定姿态的局部位姿；直接保世界变换会把动画姿势烘进去。
             LocalPos = attachNode.InverseTransformPoint(bones[0].position),
             LocalRot = Quaternion.Inverse(attachNode.rotation) * bones[0].rotation,
         };
     }
 
+    /// <summary>
+    /// 这个部位里哪些链交给衣服新做法（DEV_NOTES 37.31）：按链的第一根骨名和挂点分部位（头发、兽耳不算），
+    /// 这套 tuning.json 里该部位 on 了才交；只有一根骨的链没有「下一节」可追，除了胸部（补虚拟尖端）都照旧走 PMX 物理。
+    /// </summary>
+    private static List<ClothSway.Input> SwayInputs(MmdModel model, List<Grafted> chains, int owner)
+    {
+        var list = new List<ClothSway.Input>();
+        foreach (Grafted g in chains)
+        {
+            string at = g.Attach.name;
+            SwayKind kind = ClothSway.KindOf(g.Names[0], at);
+            // 只有一节骨的链：胸部会在 MmdRig 里拿 PMX 胸部刚体的位置补一个虚拟尖端；别的照旧 PMX
+            if (kind == SwayKind.None || !model.Tuning.Part(kind).on || (g.Bones.Length < 2 && kind != SwayKind.Chest))
+                continue;
+            list.Add(new ClothSway.Input
+            {
+                Owner = owner, Kind = kind, Bones = g.Bones, Names = g.Names, Attach = g.Attach, RestRoot = g.RestRoot,
+                Torso = at.Contains("Pelvis") || at.Contains("Spine"),
+            });
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// 腿带裙要用的身体：运行时的胯 / 两条大腿，和服装 prefab 静止骨架上量的框架（大腿相对胯的静止朝向、身体的右 / 前 / 上）。
+    /// 上 = 脚 → 胯；右 = 左大腿 → 右大腿；前 = 右 × 上，再用脚尖校正正负。缺骨就只给能给的（大腿缺了 = 不跟腿，只跟挂点）。
+    /// </summary>
+    private static ClothSway.Body SwayBody(Dictionary<string, Transform> leafIndex, Dictionary<string, Transform> lookup)
+    {
+        var b = new ClothSway.Body();
+        leafIndex.TryGetValue("Base HumanPelvis", out b.Pelvis);
+        leafIndex.TryGetValue("Base HumanLThigh1", out b.ThighL);
+        leafIndex.TryGetValue("Base HumanRThigh1", out b.ThighR);
+        // 转身用的「角色根」：从胯往上第一个不叫 Base Human… 的节点 = 整副骨架的容器，跟着角色转身、不带走路时胯的扭动
+        Transform t = b.Pelvis;
+        while (t != null && t.parent != null && t.parent.name.StartsWith("Base Human", StringComparison.Ordinal))
+            t = t.parent;
+        b.Root = t != null ? t.parent ?? t : null;
+        if (!lookup.TryGetValue("Base HumanPelvis", out Transform p) || !lookup.TryGetValue("Base HumanLThigh1", out Transform l)
+            || !lookup.TryGetValue("Base HumanRThigh1", out Transform r) || p == null || l == null || r == null)
+        {
+            b.ThighL = b.ThighR = null;
+            return b;
+        }
+        b.RestL = Quaternion.Inverse(p.rotation) * l.rotation;
+        b.RestR = Quaternion.Inverse(p.rotation) * r.rotation;
+        b.Center = (l.position + r.position) * 0.5f;
+        if (lookup.TryGetValue("Base HumanLFoot", out Transform fl) && lookup.TryGetValue("Base HumanRFoot", out Transform fr) && fl != null && fr != null)
+            b.Up = (p.position - (fl.position + fr.position) * 0.5f).normalized;
+        b.Right = Vector3.ProjectOnPlane(r.position - l.position, b.Up).normalized;
+        b.HalfWidth = Mathf.Abs(Vector3.Dot(r.position - l.position, b.Right)) * 0.5f;
+        b.Forward = Vector3.Cross(b.Right, b.Up);
+        if (lookup.TryGetValue("Base HumanLFoot", out Transform foot) && lookup.TryGetValue("Base HumanLToe", out Transform toe)
+            && foot != null && toe != null && Vector3.Dot(toe.position - foot.position, b.Forward) < 0f)
+            b.Forward = -b.Forward;
+        return b;
+    }
+
     private class Grafted
     {
         internal Transform[] Bones;
+        internal string[] Names;
         internal Transform Root;
         internal Transform Attach;
+        internal Vector3 RestRoot;
         internal Vector3 LocalPos;
         internal Quaternion LocalRot;
 
@@ -338,7 +404,8 @@ internal static class AttachPatch
 }
 
 /// <summary>
-/// 谁能跑布料物理。口径：**只给真人，不给 bot**；FIKA 里的队友也是真人，一样给。
+/// 谁能跑布料物理。口径：**只给真人，不给 bot**；FIKA 里的队友也是真人，一样给
+/// （F12「联机时只算自己」开着时不给队友，37.29）。
 /// 无头/专用服务端整个关掉（那儿没人看，白烧 CPU）。
 /// </summary>
 internal static class PlayerGate
@@ -362,6 +429,11 @@ internal static class PlayerGate
             if (player.IsAI)
             {
                 Plugin.Log.LogDebug($"[mmd] {key}: 穿在 bot 身上，不建物理");
+                return false;
+            }
+            if (Plugin.OnlySelf.Value && !player.IsYourPlayer)
+            {
+                Plugin.Log.LogDebug($"[mmd] {key}: 穿在队友身上、F12 选了「联机时只算自己」，不建物理");
                 return false;
             }
             return true;                    // 本地玩家 + FIKA 里的真人队友

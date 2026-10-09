@@ -13,7 +13,7 @@ namespace AstralDivide.Client;
 /// 而且时间步由我们自己推 —— MMD 是 60Hz 定步，这里照抄，手感才对得上。
 ///
 /// **重力是我们自己加的**，不用 Unity 的：`Physics.gravity` 是全局的，改了会影响整个游戏；
-/// 而且我们跑在 PMX 单位里，要的是 MMD 的 9.8 单位/s²（≈0.78 m/s²），不是 9.81 m/s²。
+/// 而且我们跑在 PMX 单位里，重力按每套 tuning.json 的值（PMX 单位/s²；MMD 原生 ≈ 98 = 地球重力，界面上的 9.8 内部 ×10，DEV_NOTES 37.31 更正）。
 ///
 /// **浮动原点**：布料世界比真实世界放大 12.5 倍，角色跑到地图边上时坐标会大到掉精度，
 /// 所以离原点太远就整体平移一次（整体平移不改变任何物理量）。
@@ -88,6 +88,16 @@ internal static class PhysWorld
                 _rigs[i].ApplyTuning();
     }
 
+    /// 调参台那行「这套身上有几条」：场上穿着这套的角色里，这个部位交给新做法的链数（取最多的那个）
+    internal static int SwayCount(string model, SwayKind kind)
+    {
+        int n = 0;
+        for (int i = 0; i < _rigs.Count; i++)
+            if (_rigs[i] != null && _rigs[i].Alive && _rigs[i].Model == model)
+                n = Mathf.Max(n, _rigs[i].SwayCount(kind));
+        return n;
+    }
+
     internal static void Tick(float dt)
     {
         if (!_ready || _rigs.Count == 0)
@@ -134,6 +144,13 @@ internal static class PhysWorld
         if (steps > 0)
             for (int i = 0; i < _rigs.Count; i++)
                 _rigs[i].PostStep();
+        // 插值（37.31）：每帧都按「下一步攒了多少」把头发 / 胸摆在最近两次物理结果之间，60Hz 物理在高帧率下也顺
+        float alpha = Mathf.Clamp01(_acc / step);
+        for (int i = 0; i < _rigs.Count; i++)
+            _rigs[i].Interp(alpha);
+        // 衣服新做法（37.31）每帧算一次（内部按每步 ≤ 1/60 秒拆，最多 4 步），不跟 PhysX 的 120Hz 步数走
+        for (int i = 0; i < _rigs.Count; i++)
+            _rigs[i].SwayTick(dt);
     }
 
     /// <summary>

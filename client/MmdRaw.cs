@@ -43,6 +43,9 @@ internal static class MmdRaw
     internal static MmdTuning TuningOf(string model) =>
         model != null && _byModel.TryGetValue(model, out MmdModel m) ? m.Tuning : null;
 
+    internal static MmdModel Get(string model) =>
+        model != null && _byModel.TryGetValue(model, out MmdModel m) ? m : null;
+
     internal static void LoadAll(string dir)
     {
         _byModel.Clear();
@@ -63,7 +66,8 @@ internal static class MmdRaw
                 bool hasFile = File.Exists(MmdTuning.PathFor(dir, name));
                 Plugin.Log.LogInfo($"[mmd] {name}: 手感 {m.Tuning.Describe()}{(hasFile ? "" : "（没有 tuning.json）")}");
                 _byModel[name] = m;
-                Plugin.Log.LogInfo($"[mmd] {name}: 刚体 {m.bodies.Count}（动态 {m.DynamicCount}）/ joint {m.joints.Count} / 骨 {m.bones.Count} 已读入");
+                Plugin.Log.LogInfo($"[mmd] {name}: 刚体 {m.bodies.Count}（动态 {m.DynamicCount}）/ joint {m.joints.Count} / 骨 {m.bones.Count} 已读入；" +
+                                   (m.ChestJoints.Count == 0 ? "没有胸部物理" : $"胸部关节 {m.ChestJoints.Count} 条（{(m.ChestSprung ? "原模型带弹簧" : "六轴全锁，靠放开才动")}）"));
             }
             catch (Exception e)
             {
@@ -162,9 +166,34 @@ internal class MmdModel
             DynamicCount -= anchored;
             Plugin.Log.LogInfo($"[mmd] {Name ?? "?"}: {anchored} 个刚体质量 > {MassCap:G3}（作者当锚点用），已转成骨骼追随");
         }
+        IndexChest();
     }
 
     [JsonIgnore] internal float MassCap = float.MaxValue;
+
+    // ── 胸部（DEV_NOTES 37.30）：调参台的「胸部」几项只管这些，和头发分开 ──
+    // 刚体名 Chest_L / Chest_R（少前 2 解包的六套，可露凯前面带 boneXXXX_）或 左胸1 / 右胸2 这种（蕾娜的原模型）；
+    // 子刚体是胸部的关节 = 胸部关节。六套的胸部关节六轴全锁（焊死，靠放开才动）；蕾娜的是原模型带弹簧和限位的（ChestSprung）
+    private static readonly System.Text.RegularExpressions.Regex ChestName =
+        new System.Text.RegularExpressions.Regex(@"(^|_)Chest_[LR]$|^[左右]胸\d+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    [JsonIgnore] internal readonly HashSet<int> ChestBodies = new HashSet<int>();
+    [JsonIgnore] internal readonly HashSet<int> ChestJoints = new HashSet<int>();
+    [JsonIgnore] internal bool ChestSprung;
+
+    /// 由 Index 调：认出胸部刚体和胸部关节
+    private void IndexChest()
+    {
+        foreach (MmdBody b in bodies)
+            if (ChestName.IsMatch(b.name ?? ""))
+                ChestBodies.Add(b.i);
+        foreach (MmdJoint j in joints)
+            if (ChestBodies.Contains(j.bodyB))
+            {
+                ChestJoints.Add(j.i);
+                ChestSprung |= !j.Welded;
+            }
+    }
+
     internal string BoneName(int i) => i >= 0 && i < bones.Count ? bones[i].name : null;
 
     internal Vector3 BonePos(int i) => i >= 0 && i < bones.Count ? bones[i].Pos : Vector3.zero;
@@ -228,6 +257,20 @@ internal class MmdJoint
 
     [JsonIgnore] internal Vector3 Pos => Vec.Of(pos);
     [JsonIgnore] internal Quaternion Rot => Vec.Euler(rot);
+
+    /// 六个自由度全锁死、也没弹簧（平移 0/0、角度 0/0）= 焊死；物理链上这样的关节客户端会放开（见 MmdRig.Build）
+    [JsonIgnore]
+    internal bool Welded => Zero(linMin) && Zero(linMax) && Zero(angMin) && Zero(angMax) && Zero(linSpring) && Zero(angSpring);
+
+    private static bool Zero(float[] v)
+    {
+        if (v == null)
+            return true;
+        foreach (float x in v)
+            if (Mathf.Abs(x) > 1e-6f)
+                return false;
+        return true;
+    }
 }
 
 internal class MmdBoneMap

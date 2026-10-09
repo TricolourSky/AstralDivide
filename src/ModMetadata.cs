@@ -13,7 +13,7 @@ public record ModMetadata : IModMetadata
     public string Name { get; init; } = "AstralDivide";
     public string Author { get; init; } = "TricolourSky";
     public List<string>? Contributors { get; init; }
-    public Version Version { get; init; } = new("0.1.0");
+    public Version Version { get; init; } = new("0.2.0");
     public Range SptVersion { get; init; } = new("~4.1.0");
     public bool HasPrepatcher { get; init; }
     public List<string>? Incompatibilities { get; init; }

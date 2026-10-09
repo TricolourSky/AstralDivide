@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>AstralDivide</AssemblyName>
     <RootNamespace>AstralDivide</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <EnableDynamicLoading>true</EnableDynamicLoading>
 
     <!-- 本机 SPT 服务端目录; 外部构建用 dotnet build -p:SptDir=<路径> 覆写 -->

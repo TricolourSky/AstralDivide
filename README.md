@@ -6,7 +6,7 @@ Source code of AstralDivide, a mod for [SPT](https://sp-tarkov.com/) 4.1.x.
 
 SORA, a fox-eared merchant from the Astral Divide, arrives in Tarkov with seven anime outfits that move the way they do in MMD, a shop of her own, and a story chapter about how she got here.
 
-> **0.1.0 is a test release.** Numbers and details may still change.
+> **0.2.0 is a test release.** Numbers and details may still change.
 
 ## What the mod does
 

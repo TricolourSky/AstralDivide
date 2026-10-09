@@ -5,10 +5,14 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>AstralDivide.Client</AssemblyName>
     <RootNamespace>AstralDivide.Client</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <!-- 本机 SPT 安装目录; 外部构建用 dotnet build -p:EftDir=<路径> 覆写 -->
     <EftDir Condition="'$(EftDir)' == ''">D:\SPT</EftDir>
     <Managed>$(EftDir)\EscapeFromTarkov_Data\Managed</Managed>
+    <!-- 开发版（Tech Leader 本机 dotnet build 部署的那份）带 F12 调参 / 微调 / 调试菜单；
+         发布包另编一份不带的：dotnet msbuild <本文件> -t:CoreBuild -p:Configuration=Release -p:SoraDev=false（DEV_NOTES 37.29） -->
+    <SoraDev Condition="'$(SoraDev)' == ''">true</SoraDev>
+    <DefineConstants Condition="'$(SoraDev)' == 'true'">$(DefineConstants);SORA_DEV</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,6 +22,8 @@
     <Reference Include="UnityEngine.CoreModule" HintPath="$(Managed)\UnityEngine.CoreModule.dll" Private="false" />
     <Reference Include="UnityEngine.ImageConversionModule" HintPath="$(Managed)\UnityEngine.ImageConversionModule.dll" Private="false" />
     <Reference Include="UnityEngine.PhysicsModule" HintPath="$(Managed)\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" HintPath="$(Managed)\UnityEngine.InputLegacyModule.dll" Private="false" /> <!-- Input：主菜单挂机计时，照游戏 AFKMonitor 的判法 -->
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(Managed)\UnityEngine.IMGUIModule.dll" Private="false" /> <!-- GUILayout：开发版 F12 里的按钮 / 说明行（37.29） -->
     <Reference Include="Assembly-CSharp" HintPath="$(Managed)\Assembly-CSharp.dll" Private="false" />
     <Reference Include="Newtonsoft.Json" HintPath="$(Managed)\Newtonsoft.Json.dll" Private="false" />
     <Reference Include="Comfort" HintPath="$(Managed)\Comfort.dll" Private="false" />
