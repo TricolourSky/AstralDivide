@@ -34,13 +34,14 @@ internal static class GF2Tune
 #endif
     }
 
-    /// 换上一个部位（GF2SkinPatch）：把这套的表套到这个部位的 GF2 材质上；开发版再登记 F12 的项、按「是不是你身上的」决定显示哪几套
-    internal static void OnSkin(PlayerBody body, KeyValuePair<EBodyModelPart, ResourceKey> part, LoddedSkin lodded)
+    /// <summary>
+    /// 换上一个部位（GF2SkinPatch）：把这套的表套到这个部位的少前 2 材质上；开发版再登记 F12 的项、按「是不是你身上的」决定显示哪几套。
+    /// mats = GF2Render.Register 收集好的这个部位的少前 2 材质（以前这里自己再翻一遍渲染器、标准还不一样，2026-11-09 并成一份）；
+    /// key = 部位包名（lenna_upper），模型名按 MmdRaw.ModelOf 取（lenna）
+    /// </summary>
+    internal static void OnSkin(PlayerBody body, EBodyModelPart part, string key, List<Material> mats)
     {
-        string model = ModelOf(part.Value?.path);
-        List<Material> mats = GF2Materials(lodded);
-        if (mats.Count == 0)
-            model = null;                           // 这个部位不是少前 2 渲染的
+        string model = mats.Count > 0 ? MmdRaw.ModelOf(key) : null;    // 不是少前 2 渲染的部位 = null
         if (model != null)
             foreach (Material m in mats)
                 ApplyTable(model, m);
@@ -49,30 +50,14 @@ internal static class GF2Tune
             foreach (Material m in mats)
                 Register(model, m);
         if (PlayerGate.IsLocal(body) && !PlayerGate.IconBodies.Contains(body))
-            Wear(part.Key, model);
+            Wear(part, model);
 #endif
     }
-
-    /// 部位包名 → 模型名（lenna_upper → lenna）
-    private static string ModelOf(string path)
-    {
-        if (string.IsNullOrEmpty(path))
-            return null;
-        string key = Path.GetFileNameWithoutExtension(path);
-        int cut = key.LastIndexOf('_');
-        return cut > 0 ? key.Substring(0, cut) : key;
-    }
-
-    private static List<Material> GF2Materials(LoddedSkin lodded) =>
-        lodded.GetComponentsInChildren<SkinnedMeshRenderer>(true).SelectMany(r => r.sharedMaterials)
-            .Where(m => m != null && m.shader != null && m.shader.name.StartsWith("GF2/")).Distinct().ToList();
-
-    private static string NameOf(Material m) => m.name.Replace(" (Instance)", "");
 
     /// 表里这个材质写了的参数 → 材质
     private static void ApplyTable(string model, Material m)
     {
-        if (!Table(model).TryGetValue(NameOf(m), out Dictionary<string, float> props))
+        if (!Table(model).TryGetValue(GF2Render.BaseName(m), out Dictionary<string, float> props))
             return;
         foreach (KeyValuePair<string, float> kv in props)
             m.SetFloat(kv.Key, kv.Value);
@@ -92,7 +77,7 @@ internal static class GF2Tune
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"[GF2 微调] 读 {path} 失败，这套按原版: {e.Message}");
+            Plugin.Log.LogError($"[GF2] Failed to read {path}, this outfit uses the original GF2 values: {e.Message}");
         }
         Tables[model] = table;
         return table;
@@ -125,7 +110,9 @@ internal static class GF2Tune
     private static readonly Dictionary<string, string> Names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["asteria_w"] = "阿斯缇亚 W", ["asteria_b"] = "阿斯缇亚 B", ["basti"] = "贝丝蒂", ["ots14"] = "OTs-14",
-        ["sop"] = "索普", ["clukay"] = "可露凯", ["lenna"] = "蕾娜",
+        ["sop"] = "索普", ["clukay"] = "可露凯", ["lenna"] = "蕾娜", ["vector"] = "维克托", ["tololo"] = "托洛洛",
+        ["jiangyu"] = "绛雨", ["alva"] = "埃芙", ["mitylssr"] = "米蒂尔 心跳季节", ["macqiato"] = "玛绮朵",
+        ["cecilia"] = "希丽雅",
     };
 
     private static string Display(string model) => Names.TryGetValue(model, out string n) ? n : model;
@@ -175,10 +162,11 @@ internal static class GF2Tune
         bool added = false;
         foreach (Knob k in Knobs.Where(k => k.Has(m)))
         {
-            string key = $"{model} · {NameOf(m)}：{k.Label}";
+            string name = GF2Render.BaseName(m);
+            string key = $"{model} · {name}：{k.Label}";
             if (!Items.TryGetValue(key, out Item it))
             {
-                it = new Item { Model = model, Mat = NameOf(m), Knob = k, Attr = new ConfigurationManagerAttributes { Browsable = false } };
+                it = new Item { Model = model, Mat = name, Knob = k, Attr = new ConfigurationManagerAttributes { Browsable = false } };
                 it.Entry = _cfg.Bind(CfgUtil.SecOutfit, key, k.Def, new ConfigDescription(
                     $"{k.Help}。只改{Display(model)}这一套，拖动实时生效，停 1.5 秒自动存进 gf2\\{model}.json", new AcceptableValueRange<float>(0f, 1f), it.Attr));
                 Items[key] = it;

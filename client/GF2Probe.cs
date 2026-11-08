@@ -52,7 +52,7 @@ internal static class GF2Probe
         catch (Exception e)
         {
             if (!_errorLogged)
-                Plugin.Log.LogError($"[GF2 渲染] 算环境光球谐失败（只报一次）: {e}");
+                Plugin.Log.LogError($"[GF2] Ambient light probe sampling failed (reported once): {e}");
             _errorLogged = true;
             sh = default;
             return -1;
@@ -117,7 +117,8 @@ internal static class GF2Probe
         block.SetFloat(OnId, 1f);
     }
 
-    /// 球谐在方向 n 上的值（线性，日志用）
+#if SORA_DEV
+    /// 球谐在方向 n 上的值（线性，主光调试日志用）
     internal static Vector3 Eval(SphericalHarmonicsL2 sh, Vector3 n)
     {
         var c = new Color[1];
@@ -134,4 +135,5 @@ internal static class GF2Probe
             .Select(l => $"{l.name}（{l.type} {l.renderMode} 强度 {l.intensity:0.00} 范围 {l.range:0.0} 距离 {(l.transform.position - pos).magnitude:0.0}）");
         return string.Join("、", rows);
     }
+#endif
 }

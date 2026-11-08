@@ -4,17 +4,17 @@
 
 Source code of AstralDivide, a mod for [SPT](https://sp-tarkov.com/) 4.1.x.
 
-SORA, a fox-eared merchant from the Astral Divide, arrives in Tarkov with seven anime outfits that move the way they do in MMD, a shop of her own, and a story chapter about how she got here.
+SORA, a fox-eared merchant from the Astral Divide, arrives in Tarkov with fourteen anime outfits that move the way they do in MMD, a shop of her own, and a story chapter about how she got here.
 
-> **0.2.0 is a test release.** Numbers and details may still change.
+> **0.3.0 is a test release.** Numbers and details may still change.
 
 ## What the mod does
 
 - **A new trader, SORA.** She sells the outfits, keeps a gun shelf that is re-rolled on every restock, insures and repairs your gear, and has four loyalty levels.
-- **7 outfit sets and 7 heads** in the style of Girls' Frontline 2: Exilium, each with a top, a bottom and matching first-person arms.
+- **14 outfit sets and 14 heads** in the style of Girls' Frontline 2: Exilium, each with a top, a bottom and matching first-person arms.
 - **Cloth physics.** Hair, skirts, coats, ribbons and tails are simulated from the physics data of the original MMD models: one rigid body per rigid body in the model, one joint per joint, in a physics scene of its own.
 - **A story chapter, "First Contact".** 16 quests told through encounters in raid, radio calls from the hideout and illustrated dialogue scenes. It needs [VisitAPI](https://github.com/TricolourSky/VisitAPI).
-- **English and Simplified Chinese.**
+- **English and Simplified Chinese.** The story chapter is also in Russian and Japanese.
 
 ## What is in this repository
 
@@ -59,6 +59,8 @@ dotnet build src\BinaryDimensionStore.csproj           -c Release -p:SptDir=<SPT
 ```
 
 The DLLs end up in `client\bin\Release\net472\` and `src\bin\Release\net10.0\`.
+
+The DLLs in the release archive are built with `-p:SoraDev=false` added to both commands, which leaves out the developer tools (the F12 tuning console among them).
 
 **`dotnet build` also installs what it built.** After compiling, it copies the DLL, `LICENSE` and `NOTICE.txt` into `<SPT>\BepInEx\plugins\AstralDivide\` (client) and `<SPT>\SPT_Runtime\user\mods\AstralDivide\` (server). Close the game and the server first, or the copy fails because the DLLs are in use.
 

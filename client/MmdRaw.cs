@@ -25,10 +25,7 @@ internal static class MmdRaw
     private static readonly Dictionary<string, MmdModel> _byModel =
         new Dictionary<string, MmdModel>(StringComparer.OrdinalIgnoreCase);
 
-    internal static int ModelCount => _byModel.Count;
-
-
-
+#if SORA_DEV
     /// 调参台的下拉用。排序只为了每次启动顺序一致。
     internal static List<string> ModelNames
     {
@@ -42,9 +39,7 @@ internal static class MmdRaw
 
     internal static MmdTuning TuningOf(string model) =>
         model != null && _byModel.TryGetValue(model, out MmdModel m) ? m.Tuning : null;
-
-    internal static MmdModel Get(string model) =>
-        model != null && _byModel.TryGetValue(model, out MmdModel m) ? m : null;
+#endif
 
     internal static void LoadAll(string dir)
     {
@@ -59,31 +54,35 @@ internal static class MmdRaw
                 if (m == null)
                     continue;
                 string name = Path.GetFileNameWithoutExtension(file);
-                name = name.Substring(0, name.Length - "_raw".Length);
-                m.Name = name;
+                m.Name = name.Substring(0, name.Length - "_raw".Length);
                 m.Index();
-                m.Tuning = MmdTuning.Load(dir, name);         // 每套模型自带一份手感参数，缺文件就用默认值
-                bool hasFile = File.Exists(MmdTuning.PathFor(dir, name));
-                Plugin.Log.LogInfo($"[mmd] {name}: 手感 {m.Tuning.Describe()}{(hasFile ? "" : "（没有 tuning.json）")}");
-                _byModel[name] = m;
-                Plugin.Log.LogInfo($"[mmd] {name}: 刚体 {m.bodies.Count}（动态 {m.DynamicCount}）/ joint {m.joints.Count} / 骨 {m.bones.Count} 已读入；" +
-                                   (m.ChestJoints.Count == 0 ? "没有胸部物理" : $"胸部关节 {m.ChestJoints.Count} 条（{(m.ChestSprung ? "原模型带弹簧" : "六轴全锁，靠放开才动")}）"));
+                m.Tuning = MmdTuning.Load(dir, m.Name);       // 每套模型自带一份手感参数，缺文件就用默认值
+                _byModel[m.Name] = m;
             }
             catch (Exception e)
             {
-                Plugin.Log.LogError($"[mmd] raw 解析失败 {file}: {e.Message}");
+                Plugin.Log.LogError($"[mmd] Failed to read {file}: {e.Message}");
             }
         }
     }
 
-    /// bundle 名（如 `basti_upper`）→ 模型（`basti`）。查不到返回 null，调用方直接不建物理。
-    internal static MmdModel For(string bundleKey)
+    /// <summary>
+    /// bundle 名（如 `basti_upper`、`asteria_w_upper`）→ 模型名（`basti`、`asteria_w`）：去掉最后一个下划线之后那段。
+    /// 布料物理（`&lt;模型&gt;_raw.json`）、眨眼、本套微调（gf2\&lt;模型&gt;.json）都按它找这一套的文件，只此一份（2026-11-09 并的）
+    /// </summary>
+    internal static string ModelOf(string bundleKey)
     {
         if (string.IsNullOrEmpty(bundleKey))
             return null;
         int cut = bundleKey.LastIndexOf('_');
-        string model = cut > 0 ? bundleKey.Substring(0, cut) : bundleKey;
-        return _byModel.TryGetValue(model, out MmdModel m) ? m : null;
+        return cut > 0 ? bundleKey.Substring(0, cut) : bundleKey;
+    }
+
+    /// bundle 名 → 模型。查不到返回 null，调用方直接不建物理。
+    internal static MmdModel For(string bundleKey)
+    {
+        string model = ModelOf(bundleKey);
+        return model != null && _byModel.TryGetValue(model, out MmdModel m) ? m : null;
     }
 }
 
@@ -97,8 +96,6 @@ internal class MmdModel
 
     [JsonIgnore] internal readonly Dictionary<string, int> BoneByName = new Dictionary<string, int>(StringComparer.Ordinal);
     [JsonIgnore] internal readonly Dictionary<int, MmdBoneMap> EftOfBone = new Dictionary<int, MmdBoneMap>();
-    [JsonIgnore] internal readonly Dictionary<string, List<int>> RegionBones = new Dictionary<string, List<int>>(StringComparer.Ordinal);
-    [JsonIgnore] internal int DynamicCount;
     [JsonIgnore] internal string Name;
     [JsonIgnore] internal MmdTuning Tuning = new MmdTuning();
 
@@ -108,91 +105,57 @@ internal class MmdModel
             if (!string.IsNullOrEmpty(bones[i].name))
                 BoneByName[bones[i].name] = i;
         foreach (MmdBoneMap bm in boneMap)
-        {
             EftOfBone[bm.bone] = bm;
-            if (bm.regions == null)
-                continue;
-            foreach (string r in bm.regions)
-            {
-                if (!RegionBones.TryGetValue(r, out List<int> list))
-                    RegionBones[r] = list = new List<int>();
-                list.Add(bm.bone);
-            }
-        }
-        DynamicCount = 0;
         var masses = new List<float>();
         foreach (MmdBody b in bodies)
             if (b.Kind != MmdBodyKind.BoneFollow)
-            {
-                DynamicCount++;
                 masses.Add(b.mass);
-            }
         // ⚠️ 质量上限 = 中位数 × 1000（只拦 1e16 这种明显填错的；可露凯的 raw 已按镜像链修过，正常数据不触发）。可露凯的 PMX 把头发根部刚体质量写到 1e16（中位 205、34 个 >1e6），
         //    相邻两节质量比 1e11，PhysX 的关节解算在这种比例下根本收不住 —— 主菜单里 HairC2-B1 直接掉到头下 2 米
         //    （2026-08-26 实机，`离父骨 2.0 m 已拦下`）。PhysX 官方建议相邻刚体质量比 ≤ 10。
         //    MMD 里质量只有相对意义，别的五套最大/中位 ≤ 15，这个上限对它们一个字都不改。
         masses.Sort();
         MassCap = masses.Count > 0 ? Mathf.Max(1e5f, masses[masses.Count / 2] * 1000f) : float.MaxValue;
-        // ⚠️ 质量离谱（> 中位×1000 且 > 1e5）的刚体 = 作者拿它当**锚点**：可露凯 `HairC` 整条 1e16~1e10，
-        //    两条辫子的根关节都挂在它的第二节上。它在 MMD 里等于不动；把它缩成正常质量试过（2026-08-27）：
-        //    它 5cm 的球埋在头部碰撞体里，一变成活的就每帧被往外顶，整棵头发树（A、B 都挂在它下面）跟着抖、发僵，
-        //    而改之前 B 链是好的。所以尊重作者：转成骨骼追随（kinematic、跟骨走、不写回），别缩、别拉脱。
-        int anchored = 0;
+        AnchorHeavy();
+        Undamp(masses.Count);
+    }
+
+    /// <summary>
+    /// ⚠️ 质量离谱（> 中位×1000 且 > 1e5）的刚体 = 作者拿它当**锚点**：可露凯 `HairC` 整条 1e16~1e10，
+    /// 两条辫子的根关节都挂在它的第二节上。它在 MMD 里等于不动；把它缩成正常质量试过（2026-08-27）：
+    /// 它 5cm 的球埋在头部碰撞体里，一变成活的就每帧被往外顶，整棵头发树（A、B 都挂在它下面）跟着抖、发僵，
+    /// 而改之前 B 链是好的。所以尊重作者：转成骨骼追随（kinematic、跟骨走、不写回），别缩、别拉脱。
+    /// </summary>
+    private void AnchorHeavy()
+    {
         foreach (MmdBody b in bodies)
             if (b.Kind != MmdBodyKind.BoneFollow && b.mass > MassCap)
-            {
                 b.physicsType = "Static";
-                anchored++;
-            }
-        // ⚠️ 阻尼 1.0 = Bullet 里每步把速度清零，刚体只能被关节拖着走、自己不会落（头发下落慢得不自然）。
-        //    可露凯 103/111 个刚体是 1.0，其他五套中位 0.94~0.95、满格的只有零星几个（那些是有意的，别动）。
-        //    所以按模型判：超过一半的动态刚体都满格 = 作者拿极端值凑效果，把满格的压到 0.95（别家的中位数）。
+    }
+
+    /// <summary>
+    /// ⚠️ 阻尼 1.0 = Bullet 里每步把速度清零，刚体只能被关节拖着走、自己不会落（头发下落慢得不自然）。
+    /// 可露凯 103/111 个刚体是 1.0，其他五套中位 0.94~0.95、满格的只有零星几个（那些是有意的，别动）。
+    /// 所以按模型判：超过一半的动态刚体都满格 = 作者拿极端值凑效果，把满格的压到 0.95（别家的中位数）。
+    /// dynamic = 转锚点之前的动态刚体数（满格数只数转完还是动态的那些，和以前一字不差）。
+    /// </summary>
+    private void Undamp(int dynamic)
+    {
         int saturated = 0;
         foreach (MmdBody b in bodies)
             if (b.Kind != MmdBodyKind.BoneFollow && (b.linearDamping >= 0.999f || b.angularDamping >= 0.999f))
                 saturated++;
-        if (DynamicCount > 0 && saturated * 2 > DynamicCount)
-        {
-            foreach (MmdBody b in bodies)
-                if (b.Kind != MmdBodyKind.BoneFollow)
-                {
-                    if (b.linearDamping >= 0.999f) b.linearDamping = 0.95f;
-                    if (b.angularDamping >= 0.999f) b.angularDamping = 0.95f;
-                }
-            Plugin.Log.LogInfo($"[mmd] {Name ?? "?"}: {saturated}/{DynamicCount} 个刚体阻尼满格 1.0（速度每步清零），已压到 0.95");
-        }
-        if (anchored > 0)
-        {
-            DynamicCount -= anchored;
-            Plugin.Log.LogInfo($"[mmd] {Name ?? "?"}: {anchored} 个刚体质量 > {MassCap:G3}（作者当锚点用），已转成骨骼追随");
-        }
-        IndexChest();
+        if (dynamic == 0 || saturated * 2 <= dynamic)
+            return;
+        foreach (MmdBody b in bodies)
+            if (b.Kind != MmdBodyKind.BoneFollow)
+            {
+                if (b.linearDamping >= 0.999f) b.linearDamping = 0.95f;
+                if (b.angularDamping >= 0.999f) b.angularDamping = 0.95f;
+            }
     }
 
     [JsonIgnore] internal float MassCap = float.MaxValue;
-
-    // ── 胸部（DEV_NOTES 37.30）：调参台的「胸部」几项只管这些，和头发分开 ──
-    // 刚体名 Chest_L / Chest_R（少前 2 解包的六套，可露凯前面带 boneXXXX_）或 左胸1 / 右胸2 这种（蕾娜的原模型）；
-    // 子刚体是胸部的关节 = 胸部关节。六套的胸部关节六轴全锁（焊死，靠放开才动）；蕾娜的是原模型带弹簧和限位的（ChestSprung）
-    private static readonly System.Text.RegularExpressions.Regex ChestName =
-        new System.Text.RegularExpressions.Regex(@"(^|_)Chest_[LR]$|^[左右]胸\d+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-    [JsonIgnore] internal readonly HashSet<int> ChestBodies = new HashSet<int>();
-    [JsonIgnore] internal readonly HashSet<int> ChestJoints = new HashSet<int>();
-    [JsonIgnore] internal bool ChestSprung;
-
-    /// 由 Index 调：认出胸部刚体和胸部关节
-    private void IndexChest()
-    {
-        foreach (MmdBody b in bodies)
-            if (ChestName.IsMatch(b.name ?? ""))
-                ChestBodies.Add(b.i);
-        foreach (MmdJoint j in joints)
-            if (ChestBodies.Contains(j.bodyB))
-            {
-                ChestJoints.Add(j.i);
-                ChestSprung |= !j.Welded;
-            }
-    }
 
     internal string BoneName(int i) => i >= 0 && i < bones.Count ? bones[i].name : null;
 
@@ -277,7 +240,6 @@ internal class MmdBoneMap
 {
     public int bone;
     public string eft;
-    public string[] regions;
 }
 
 internal static class Vec

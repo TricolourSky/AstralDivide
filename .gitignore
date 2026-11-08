@@ -16,3 +16,7 @@ obj/
 
 # Not code: clothing thumbnails ship in the release archive
 /client/icons/
+
+# Not released yet: stays local, only the developer build compiles it
+/src/Unreleased/
+/client/Unreleased/

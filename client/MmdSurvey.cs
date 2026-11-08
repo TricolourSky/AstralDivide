@@ -42,7 +42,8 @@ internal class MmdSurvey
 
     internal const string TorsoKey = "#torso";
 
-    private static readonly HashSet<string> _reported = new HashSet<string>();
+    /// 没有残差 <10 mm 的链组时，残差小于这个值的组还能退而定尺度（第一人称手部包的袖子链，见 PickScale）。
+    private const float SpareRms = 0.025f;
 
     private readonly MmdModel _m;
     private readonly Dictionary<string, Rest> _phys = new Dictionary<string, Rest>();
@@ -51,7 +52,6 @@ internal class MmdSurvey
     private readonly Dictionary<string, List<string>> _groupBones = new Dictionary<string, List<string>>();
     private readonly Dictionary<string, MmdFit> _fits = new Dictionary<string, MmdFit>();
 
-    private readonly List<string> _limbTurn = new List<string>();
     private float _scaleFix = 1f;
 
     /// 1 个 PMX 单位 = 多少米（玩家空间）。以前硬编码 0.08，现在是从骨骼点云量出来的。
@@ -103,110 +103,132 @@ internal class MmdSurvey
             _scaleFix = b / a;
     }
 
+    /// <summary>
     /// 把所有拟合解出来。返回 false = 一组都解不出来，调用方直接放弃建物理。
+    /// 每组的拟合结果不再逐条报（以前每次换装都打一遍，审查 D2 / P3）：拟合不好的组，它的刚体建不起来时 MmdRig 会报一次原因；
+    /// 残差偏大的组只是不参与定尺度，不算问题
+    /// </summary>
     internal bool Solve(string bundleKey)
     {
-        bool loud = _reported.Add(bundleKey);       // 同一个 bundle 只详细报告一次，换装时别刷屏
         foreach (KeyValuePair<string, List<string>> g in _groupBones)
+            _fits[g.Key] = FitGroup(g.Value);
+        if (!PickScale(out float scale))
         {
-            var src = new List<Vector3>();
-            var dst = new List<Vector3>();
-            foreach (string n in g.Value)
-                if (_m.BoneByName.TryGetValue(n, out int bi) && _phys.TryGetValue(n, out Rest r))
-                {
-                    src.Add(_m.BonePos(bi));
-                    dst.Add(r.Pos);
-                }
-            _fits[g.Key] = MmdFit.Solve(src, dst);
-            Report(bundleKey, g.Key, _fits[g.Key], loud);
-        }
-
-        // 尺度只认**链组**拟合 —— 它们的点是同一批骨原样搬过去的，残差 0 才有资格定尺度。
-        var scales = new List<float>();
-        foreach (MmdFit f in _fits.Values)
-            if (f.Usable && f.Rms < 0.01f)
-                scales.Add(f.Scale);
-        if (scales.Count == 0)
-        {
-            Plugin.Log.LogError($"[mmd] {bundleKey}: 没有一个可信的链组拟合，本部位不建物理");
+            LogOnce.Error($"[mmd] {bundleKey}: no reliable chain-group fit, no physics for this part");
             return false;
         }
-        scales.Sort();
-        MetersPerUnit = scales[scales.Count / 2] * _scaleFix;
-        if (Mathf.Abs(_scaleFix - 1f) > 1e-3f)
-            Plugin.Log.LogWarning($"[mmd] {bundleKey}: prefab 与玩家骨架缩放不一致（×{_scaleFix:F4}），已补偿");
-        if (loud)
-            Plugin.Log.LogInfo($"[mmd] {bundleKey}: 1 PMX 单位 = {MetersPerUnit * 1000f:F2} mm"
-                               + $"（{scales.Count} 个可信链组量出来的，PMX 参考值 {_m.scale * 1000.0:F0} mm）");
+        MetersPerUnit = scale * _scaleFix;           // prefab 和玩家骨架缩放不一致时（_scaleFix ≠ 1）在这里补偿
         return true;
     }
 
-    private void Report(string key, string label, MmdFit fit, bool loud)
+    /// 一个链组的点云拟合：PMX 里的骨位置 → prefab 静止姿态里同名骨的位置
+    private MmdFit FitGroup(List<string> bones)
     {
-        if (!fit.Usable)
-        {
-            // 单链的骨天生共线（贝丝蒂的尾巴就是），这是**正确判断**不是故障：
-            // 挂在躯干上的链会自动退到 #torso 大拟合，照样建得起来。
-            bool rescued = IsTorso(label);
-            string tail = rescued ? "—— 已退到躯干大拟合，不影响" : "—— 该组刚体会被跳过";
-            string line = $"[mmd] {key}: 拟合组 {label} 单独不可用（{fit.Count} 点，共线度 {fit.Linearity:F3}）{tail}";
-            if (rescued)
+        var src = new List<Vector3>();
+        var dst = new List<Vector3>();
+        foreach (string n in bones)
+            if (_m.BoneByName.TryGetValue(n, out int bi) && _phys.TryGetValue(n, out Rest r))
             {
-                if (loud) Plugin.Log.LogInfo(line);
+                src.Add(_m.BonePos(bi));
+                dst.Add(r.Pos);
             }
-            else
-                Plugin.Log.LogWarning(line);
-            return;
-        }
-        string msg = $"[mmd] {key}: 拟合组 {label} {fit.Count} 点，残差 {fit.Rms * 1000f:F2} mm，"
-                     + $"尺度 {fit.Scale * 1000f:F2} mm/单位，共线度 {fit.Linearity:F3}";
-        if (fit.Rms > 0.01f)
-            Plugin.Log.LogWarning(msg + "  ← ⚠ 残差偏大，这组不参与定尺度");
-        else if (loud)
-            Plugin.Log.LogInfo(msg);
+        return MmdFit.Solve(src, dst);
     }
 
-    /// 一个 PMX 刚体 → (跟哪根骨、相对那根骨的固定位置和朝向)。返回 false = 这个刚体建不了。
+    /// <summary>
+    /// 尺度只认**链组**拟合 —— 它们的点是同一批骨原样搬过去的，残差 0 才有资格定尺度：取残差 &lt; 10 mm 那些组的中位数。
+    /// 一组都没有时：第一人称手部包（2026-11-06 托洛洛起带袖子物理）只有挂在上臂的袖子链，没有躯干那种原样搬过去的骨，
+    /// 上臂在对齐时沿骨轴缩放过（托洛洛 ×1.26），袖骨点云被拉长，残差卡在 10 mm 上下（离线复现 10.1 / 10.2 mm），
+    /// 按老规矩整个部位不建物理 = 第一人称袖子梆硬。退一步：取残差最小、仍 &lt; 25 mm 的那组定尺度 ——
+    /// 尺度差几个百分点（98 vs 93 mm/单位），比没有物理强得多。有残差 &lt; 10 mm 的组时这条路不走。再没有就返回 false
+    /// </summary>
+    private bool PickScale(out float scale)
+    {
+        var scales = new List<float>();
+        MmdFit spare = null;
+        foreach (MmdFit f in _fits.Values)
+        {
+            if (!f.Usable)
+                continue;
+            if (f.Rms < 0.01f)
+                scales.Add(f.Scale);
+            else if (f.Rms < SpareRms && (spare == null || f.Rms < spare.Rms))
+                spare = f;
+        }
+        if (scales.Count == 0 && spare != null)
+            scales.Add(spare.Scale);
+        scales.Sort();
+        scale = scales.Count > 0 ? scales[scales.Count / 2] : 0f;
+        return scales.Count > 0;
+    }
+
+    /// 一个 PMX 刚体 → (跟哪根骨、相对那根骨的固定位置和朝向)。返回 false = 这个刚体建不了，why = 原因（英文，MmdRig 报一次）
     internal bool Resolve(MmdBody body, out Transform bone, out Vector3 localPos, out Quaternion localRot, out string why)
     {
         bone = null;
         localPos = Vector3.zero;
         localRot = Quaternion.identity;
         why = null;
-
         string bn = _m.BoneName(body.bone);
         if (string.IsNullOrEmpty(bn))
         {
-            why = "刚体没有归属骨";
+            why = "the rigid body has no bone";
             return false;
         }
-
         // ① 物理骨（头发/裙子/外套）：用它自己那条链的拟合，不行就退到躯干大拟合
         if (_phys.TryGetValue(bn, out Rest rest))
+            return PlacePhys(body, bn, rest, out bone, out localPos, out localRot, out why);
+        if (!EftAnchor(body, out MmdBoneMap bm, out rest))
         {
-            MmdFit fit = null;
-            string gk = null;
-            if (_boneGroup.TryGetValue(bn, out gk))
-                _fits.TryGetValue(gk, out fit);
-            // 只有**挂在躯干上**的链才准退到躯干大拟合。挂在手臂/腿上的链绝不能退 ——
-            // 那两块在对齐时被转过，用躯干的变换会把袖布甩到几十厘米外，还不如不建。
-            if ((fit == null || !fit.Usable) && IsTorso(gk))
-                _fits.TryGetValue(TorsoKey, out fit);
-            if (fit == null || !fit.Usable)
-            {
-                why = $"物理骨 {bn}（链组 {gk}）的拟合不可用" + (IsTorso(gk) ? "，躯干拟合也不可用" : "，且它不在躯干上、不许借用躯干拟合");
-                return false;
-            }
-            return Place(fit, body, rest, out bone, out localPos, out localRot);
+            why = $"bone {bn} is not in this part's chains and has no EFT-mapped bone above it";
+            return false;
         }
+        // ② 躯干碰撞体：躯干和头发同属一个刚性块，直接用躯干大拟合
+        if (IsTorso(bm.eft))
+        {
+            if (_fits.TryGetValue(TorsoKey, out MmdFit tf) && tf.Usable)
+                return Place(tf, body, rest, out bone, out localPos, out localRot);
+            why = $"bone {bn} -> {bm.eft}: the torso fit is not usable";
+            return false;
+        }
+        // ③ 四肢碰撞体：按 EFT 骨自身几何重建
+        return Limb(body, bm, rest, out bone, out localPos, out localRot, out why);
+    }
 
-        // ② / ③ / ④ 的落脚点：先按自己找，找不到就**沿 PMX 骨层级往上**找第一个 EFT 映射骨。
-        //
-        // ⚠️ 上溯这一步是 2026-08-23 实机补的，不是锦上添花：贝丝蒂的 `Bow` 是个**骨骼追随刚体**，
-        // 4 条蝴蝶结链全靠 joint 吊在它上面，但它自己不在任何链里（提链工具把它当成"挂点"了）。
-        // 它建不起来 → 那 4 条 joint 的固定端不存在 → 8 个刚体一根绳都没有 → **自由落体**，
-        // 骨被拉到两米外，画面上就是一条几十米长的黑刺。
-        MmdBoneMap bm = null;
+    /// <summary>
+    /// ① 物理骨：用它自己那条链的拟合。只有**挂在躯干上**的链才准退到躯干大拟合。挂在手臂/腿上的链绝不能退 ——
+    /// 那两块在对齐时被转过，用躯干的变换会把袖布甩到几十厘米外，还不如不建。
+    /// </summary>
+    private bool PlacePhys(MmdBody body, string bn, Rest rest, out Transform bone, out Vector3 localPos, out Quaternion localRot, out string why)
+    {
+        why = null;
+        MmdFit fit = null;
+        if (_boneGroup.TryGetValue(bn, out string gk))
+            _fits.TryGetValue(gk, out fit);
+        if ((fit == null || !fit.Usable) && IsTorso(gk))
+            _fits.TryGetValue(TorsoKey, out fit);
+        if (fit != null && fit.Usable)
+            return Place(fit, body, rest, out bone, out localPos, out localRot);
+        bone = null;
+        localPos = Vector3.zero;
+        localRot = Quaternion.identity;
+        why = $"no usable fit for physics bone {bn} (chain group {gk})"
+              + (IsTorso(gk) ? ", and the torso fit is not usable either" : "; it is not on the torso, so it may not borrow the torso fit");
+        return false;
+    }
+
+    /// <summary>
+    /// ② / ③ 的落脚点：先按自己找，找不到就**沿 PMX 骨层级往上**找第一个 EFT 映射骨（最多 16 层）。
+    ///
+    /// ⚠️ 上溯这一步是 2026-08-23 实机补的，不是锦上添花：贝丝蒂的 `Bow` 是个**骨骼追随刚体**，
+    /// 4 条蝴蝶结链全靠 joint 吊在它上面，但它自己不在任何链里（提链工具把它当成"挂点"了）。
+    /// 它建不起来 → 那 4 条 joint 的固定端不存在 → 8 个刚体一根绳都没有 → **自由落体**，
+    /// 骨被拉到两米外，画面上就是一条几十米长的黑刺。
+    /// </summary>
+    private bool EftAnchor(MmdBody body, out MmdBoneMap bm, out Rest rest)
+    {
+        bm = null;
+        rest = null;
         int hop = body.bone;
         for (int n = 0; n < 16 && hop >= 0 && rest == null; n++)
         {
@@ -214,25 +236,7 @@ internal class MmdSurvey
                 _eft.TryGetValue(bm.eft, out rest);
             hop = hop < _m.bones.Count ? _m.bones[hop].parent : -1;
         }
-        if (rest == null || bm == null)
-        {
-            why = $"骨 {bn} 既不在本部位的链里，往上也找不到任何 EFT 映射骨";
-            return false;
-        }
-
-        // ② 躯干碰撞体：躯干和头发同属一个刚性块，直接用躯干大拟合
-        if (IsTorso(bm.eft))
-        {
-            if (!_fits.TryGetValue(TorsoKey, out MmdFit tf) || !tf.Usable)
-            {
-                why = $"骨 {bn} → {bm.eft}：躯干拟合不可用";
-                return false;
-            }
-            return Place(tf, body, rest, out bone, out localPos, out localRot);
-        }
-
-        // ③ 四肢碰撞体：按 EFT 骨自身几何重建
-        return Limb(body, bm, rest, out bone, out localPos, out localRot, out why);
+        return rest != null && bm != null;
     }
 
     private bool Place(MmdFit fit, MmdBody body, Rest rest, out Transform bone, out Vector3 localPos, out Quaternion localRot)
@@ -269,13 +273,13 @@ internal class MmdSurvey
         Transform restChild = EftChild(rest.RestTf);
         if (restChild == null)
         {
-            why = $"四肢骨 {bm.eft} 在 prefab 里找不到下一节骨，定不出骨轴";
+            why = $"limb bone {bm.eft} has no next bone in the prefab, its axis is unknown";
             return false;
         }
         Vector3 eAxis = restChild.position - rest.Pos;
         if (eAxis.sqrMagnitude < 1e-10f)
         {
-            why = $"四肢骨 {bm.eft} 与下一节重合，定不出骨轴";
+            why = $"limb bone {bm.eft} sits on its next bone, its axis is unknown";
             return false;
         }
         eAxis.Normalize();
@@ -291,23 +295,7 @@ internal class MmdSurvey
         localPos = Quaternion.Inverse(rest.Rot) * offset * _scaleFix;
         localRot = Quaternion.Inverse(rest.Rot) * (swing * body.Rot);
         bone = rest.Tf;
-
-        // 报告时要扣掉「PMX 模型空间 → prefab 空间」那个基准旋转，否则量的是两个坐标系的差、
-        // 不是这根四肢骨自己被转了多少 —— 首版就是没扣，报出一片 85~155° 的假警报。
-        if (_fits.TryGetValue(TorsoKey, out MmdFit tf) && tf.Usable)
-            _limbTurn.Add($"{bm.eft.Replace("Base Human", "")} {Vector3.Angle(tf.Rot * mAxis, eAxis):F0}°");
         return bone != null;
-    }
-
-    /// 四肢碰撞体的对账：每根四肢骨相对躯干块被转了多少。腿应该很小，手臂大是正常的
-    /// （MMD 是斜下垂臂、EFT 是 T-pose）。由 <see cref="MmdRig"/> 建完之后调一次。
-    internal string LimbReport()
-    {
-        if (_limbTurn.Count == 0)
-            return null;
-        string line = "四肢骨相对躯干的转角：" + string.Join(" / ", _limbTurn.ToArray());
-        _limbTurn.Clear();
-        return line;
     }
 
     /// prefab 层级里这根 EFT 骨的下一节（名字同样以 `Base Human` 开头的第一个子节点）。

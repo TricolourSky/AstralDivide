@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Reflection;
 using BepInEx;
 using BepInEx.Configuration;
@@ -17,7 +16,7 @@ namespace AstralDivide.Client;
 //    Forge 的规定（2026-10-01 照它改）：GUID 必须和服务端 ModGuid、上传时填的 GUID 三者相同；
 //    插件名必须是「用户名-模组名」，只许字母、数字和一个横杠。下面 Harmony 的 id 跟 GUID 保持一致。
 //    用过的旧值：com.binarydimension.store.client → com.tricoloursky.astraldivide.client（都不合规）。
-[BepInPlugin("com.tricoloursky.astraldivide", "TricolourSky-AstralDivide", "0.2.0")]
+[BepInPlugin("com.tricoloursky.astraldivide", "TricolourSky-AstralDivide", "0.3.0")]
 public class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log;
@@ -28,19 +27,19 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> OnlySelf;
     internal static ConfigEntry<float> CullRange;
     internal static ConfigEntry<int> StepHz;
-#pragma warning disable CS0649     // 开发版才有（F12「5. 主菜单展示」）；发布版一直是 null，用下面的默认值
+#pragma warning disable CS0649     // 开发版才有（F12「主菜单展示」）；发布版一直是 null，用下面的默认值
     private static ConfigEntry<float> _menuFollow;
     private static ConfigEntry<float> _idleWait;
 #pragma warning restore CS0649
 
-    // 发布版没有「5. 主菜单展示」，用这两个值（0.2.0 = Tech Leader 2026-10-10 F12 里调好的：跟随场景光 1、挂机 15 秒）
+    // 发布版没有「主菜单展示」，用这两个值（0.2.0 = Tech Leader 2026-10-10 F12 里调好的：跟随场景光 1、挂机 15 秒）
     private const float MenuFollowDefault = 1f, IdleWaitDefault = 15f;
 
     /// 主菜单跟随场景光（GF2Render ⑥：主菜单里「材质本色 / 少前 2 光照」怎么混）
-    internal static float MenuFollow => _menuFollow != null ? _menuFollow.Value : MenuFollowDefault;
+    internal static float MenuFollow => CfgUtil.Or(_menuFollow, MenuFollowDefault);
 
     /// 主菜单挂机多少秒播 OTs-14 的挂机表情
-    internal static float IdleWait => _idleWait != null ? _idleWait.Value : IdleWaitDefault;
+    internal static float IdleWait => CfgUtil.Or(_idleWait, IdleWaitDefault);
 
     private void Awake()
     {
@@ -54,18 +53,17 @@ public class Plugin : BaseUnityPlugin
 #if SORA_DEV
         TuneUI.Bind(Config, physDir, MmdRaw.ModelNames);       // 布料调参台
 #endif
-        GF2Tune.Init(Config, PluginDir);                        // 本套微调（开发版）
-        GF2Render.BindConfig(Config);                           // 光照换算 / 主菜单展示 / 调试（开发版）
+        GF2Tune.Init(Config, PluginDir);                        // 本套微调：发布版也要（设 gf2 表目录），菜单只在开发版
 #if SORA_DEV
+        GF2Render.BindConfig(Config);                           // 光照换算 / 主菜单展示 / 调试
         BindMenuExtras();                                       // 主菜单展示里插件这边的两项
 #endif
         DropOldEntries();
         new Harmony("com.tricoloursky.astraldivide").PatchAll();
-        Log.LogInfo($"插件初始化完成: MMD 物理 {MmdRaw.ModelCount} 个模型 / 热成像兼容 / 服装缩略图");
     }
 
     /// F12「布料物理」：发布包里玩家只看得到这一组（DEV_NOTES 37.29）。组名和 0.1.0 一样（玩家原来的设置直接接上）；
-    /// 物理步频以前在「布料性能」，37.29 第一版在「1. 布料物理」，值搬过来
+    /// 物理步频 0.1.0 在「布料性能」，值搬过来
     private void BindPhysics()
     {
         const string sec = CfgUtil.SecPhysics;
@@ -80,13 +78,11 @@ public class Plugin : BaseUnityPlugin
         StepHz = Config.Bind(sec, "物理步频(Hz)", 120, CfgUtil.Desc(
             "每秒算几次头发的物理（还有没交给新做法的绳子之类）。120（默认）= 头发数值调的时候用的；60 更省 CPU 但头发会变飘；240 更细（衣服、胸部不受这项影响）", 1,
             new AcceptableValueList<int>(60, 120, 240), "物理步频（Hz）"));
-        foreach (ConfigEntryBase e in new ConfigEntryBase[] { Enabled, OnlySelf, CullRange, StepHz })
-            CfgUtil.Move(Config, CfgUtil.Numbered[0], e.Definition.Key, e);
         CfgUtil.Move(Config, "布料性能", "物理步频(Hz)", StepHz);
     }
 
 #if SORA_DEV
-    /// 开发版 F12「主菜单展示」里插件这边的两项（另外三项在 GF2Render.BindMenu）；37.29 第一版在「5. 主菜单展示」，值搬过来
+    /// 开发版 F12「主菜单展示」里插件这边的两项（另外三项在 GF2Render.BindMenu）
     private void BindMenuExtras()
     {
         _menuFollow = Config.Bind(CfgUtil.SecMenu, "主菜单跟随场景光", MenuFollowDefault, CfgUtil.Desc(
@@ -95,21 +91,20 @@ public class Plugin : BaseUnityPlugin
         _idleWait = Config.Bind(CfgUtil.SecMenu, "主菜单挂机多少秒触发", IdleWaitDefault, CfgUtil.Desc(
             "主菜单里不动鼠标、不按键这么久，OTs-14 播一遍挂机表情（试验，只有 OTs-14；动一下才会再播）", 1,
             new AcceptableValueRange<float>(5f, 600f), "挂机表情等待（秒）"));
-        CfgUtil.Move(Config, CfgUtil.Numbered[4], "主菜单跟随场景光", _menuFollow);
-        CfgUtil.Move(Config, CfgUtil.Numbered[4], "主菜单挂机多少秒触发", _idleWait);
     }
 #endif
 
-    /// 改过名的旧组：要留的值上面已经搬走，剩下的（不再用的旧项、整组搬走的组）从 cfg 里删掉，再存一次
+    /// 0.1.0 的旧组：要留的值上面已经搬走，剩下的（不再用的旧项、整组搬走的组）从 cfg 里删掉，再存一次
     private void DropOldEntries()
     {
-        foreach (string old in CfgUtil.Numbered.Concat(new[] { "布料性能", "渲染", "表情", "GF2 渲染", "布料手感(调参台)" }))
+        foreach (string old in new[] { "布料性能", "渲染", "表情", "GF2 渲染", "布料手感(调参台)" })
             CfgUtil.Drop(Config, old);
         Config.Save();
     }
 
     // 主菜单单独用一个「跟随场景光」强度：战局里跟随环境是对的，主菜单需要更适合展示的固定值。
     // ⚠️ 别直接归零 —— 那是 100% 自发光，画面会平、而且比原来亮一截（08-22 实测）。
+    // _GF2MenuLight 只有旧的 GF2/Matcap shader 读：现役包里还有表情贴片材质在用它（2026-11-09 核过 SDK 材质），别删
     private static readonly int MenuLightId = Shader.PropertyToID("_GF2MenuLight");
     private static readonly int MenuFollowId = Shader.PropertyToID("_GF2MenuFollow");
 
@@ -138,7 +133,7 @@ public class Plugin : BaseUnityPlugin
     {
         if (!Directory.Exists(dir))
         {
-            Log.LogInfo($"physics 配置目录不存在, 布料物理停用: {dir}");
+            Log.LogWarning($"physics folder not found, cloth physics is off: {dir}");
             return;
         }
         foreach (string file in Directory.GetFiles(dir, "*.json"))
@@ -148,21 +143,17 @@ public class Plugin : BaseUnityPlugin
             if (file.EndsWith(".tuning.json", StringComparison.OrdinalIgnoreCase))
                 continue;                       // 每套模型的手感参数，由 MmdTuning 读
             PhysicsConfig cfg = PhysicsConfig.Load(file);
-            if (cfg == null)
-                continue;
-            string key = Path.GetFileNameWithoutExtension(file);
-            if (key.EndsWith(".physics", StringComparison.OrdinalIgnoreCase))
-                key = key.Substring(0, key.Length - ".physics".Length);
-            Configs[key] = cfg;
+            if (cfg != null)
+                Configs[Path.GetFileNameWithoutExtension(file)] = cfg;
         }
-        Log.LogInfo($"已加载 {Configs.Count} 份链配置");
     }
 
     // ── FIKA 无头客户端探测 ────────────────────────────────────────────────
     //
     // 无头（专用服务端）客户端上没人看画面，跑布料纯属白烧 CPU。
     // **用反射探，不加引用** —— 没装 FIKA 的人一点影响都没有，FIKA 改版本也编译得过。
-    // 懒查：插件的加载顺序可能在 FIKA 之前，Awake 那会儿它还没加载。
+    // 第一次用到时才探（第一次换装，那时所有插件早就加载完了），**找没找到都只探这一次**：
+    // 以前只有找到 FIKA 才记「探过」，没装 FIKA 的人每刷出一个人都要把所有程序集翻 4~5 遍（2026-11-09 改）。
     private static PropertyInfo _headlessProp;
     private static bool _headlessProbed;
 
@@ -173,7 +164,10 @@ public class Plugin : BaseUnityPlugin
             try
             {
                 if (!_headlessProbed)
+                {
+                    _headlessProbed = true;
                     Probe();
+                }
                 return _headlessProp != null && _headlessProp.GetValue(null) is bool b && b;
             }
             catch
@@ -189,14 +183,34 @@ public class Plugin : BaseUnityPlugin
         {
             if (asm.GetName().Name != "Fika.Core")
                 continue;
-            _headlessProbed = true;
             Type t = asm.GetType("Fika.Core.Main.Utils.FikaBackendUtils") ??
                      asm.GetType("Fika.Core.Utils.FikaBackendUtils");
             _headlessProp = t?.GetProperty("IsHeadless", BindingFlags.Public | BindingFlags.Static);
-            Log.LogInfo(_headlessProp != null
-                ? "[mmd] 检测到 FIKA，已接上无头客户端判定"
-                : "[mmd] 检测到 FIKA 但找不到 IsHeadless，按「有人在看」处理");
+            if (_headlessProp == null)
+                Log.LogWarning("Fika found but FikaBackendUtils.IsHeadless is missing; treating this client as a normal (non-headless) one");
             return;
         }
+    }
+}
+
+/// <summary>
+/// 同一句提示一局游戏只报一次。换装、刷人会反复走同一段代码：数据真有问题时报一次就够，别每次换装都刷一遍
+/// （10-17 审查：一局 233 行日志里没有一行在报真问题，ots14 那几句每次换装重报）。
+/// </summary>
+internal static class LogOnce
+{
+    private static readonly HashSet<string> Seen = new HashSet<string>();
+
+    /// onceKey：按它判「报过没有」（消息里带着每次都会变的数时用），不给就按消息本身
+    internal static void Warn(string message, string onceKey = null)
+    {
+        if (Seen.Add(onceKey ?? message))
+            Plugin.Log.LogWarning(message);
+    }
+
+    internal static void Error(string message)
+    {
+        if (Seen.Add(message))
+            Plugin.Log.LogError(message);
     }
 }

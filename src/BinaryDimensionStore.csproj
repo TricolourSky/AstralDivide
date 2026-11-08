@@ -6,14 +6,23 @@
     <Nullable>enable</Nullable>
     <AssemblyName>AstralDivide</AssemblyName>
     <RootNamespace>AstralDivide</RootNamespace>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <EnableDynamicLoading>true</EnableDynamicLoading>
 
     <!-- 本机 SPT 服务端目录; 外部构建用 dotnet build -p:SptDir=<路径> 覆写 -->
     <SptDir Condition="'$(SptDir)' == ''">D:\SPT\SPT_Runtime</SptDir>
     <ModRoot>$(MSBuildProjectDirectory)\..</ModRoot>
     <ModDir>$(SptDir)\user\mods\AstralDivide</ModDir>
+    <!-- 开发版（Tech Leader 本机 dotnet build 部署的那份）带还没发布的内容；发布包另编一份不带的（make_package.py 拿它）：
+         cd src; dotnet msbuild BinaryDimensionStore.csproj -t:CoreBuild -p:Configuration=Release -p:SoraDev=false -p:OutDir=bin\Publish\ -p:IntermediateOutputPath=obj\Publish\
+         CoreBuild 不跑下面的 Deploy，发布版不会被拷进游戏目录 -->
+    <SoraDev Condition="'$(SoraDev)' == ''">true</SoraDev>
   </PropertyGroup>
+
+  <!-- Unreleased\：还没发布的内容，只进开发版。发布版不编；也不进公开仓库（.gitignore） -->
+  <ItemGroup Condition="'$(SoraDev)' == 'false'">
+    <Compile Remove="Unreleased/**" />
+  </ItemGroup>
 
   <!--
     ⚠️ 照**最低支持版本**的官方包编译，不要引本机安装目录里的 DLL。

@@ -64,14 +64,14 @@ internal static class SkeletonPatch
                         InjectionRegistry.PendingNames.Add(name);
                 }
                 else
-                    Plugin.Log.LogWarning($"骨 {name} 在骨架与服装 prefab 里都找不到, 跳过注入");
+                    LogOnce.Warn($"Bone {name} is in neither the skeleton nor the outfit prefab, not injected");
             }
             if (record)
                 WarnUnmanaged(injected);
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"SkeletonPatch 异常: {e}");
+            Plugin.Log.LogError($"SkeletonPatch error: {e}");
         }
     }
 
@@ -95,7 +95,7 @@ internal static class SkeletonPatch
                 (orphans ?? (orphans = new List<string>())).Add(name);
         }
         if (orphans != null)
-            Plugin.Log.LogWarning($"注入了不属于任何已配置链的骨 (网格撕裂前兆): {string.Join(", ", orphans)}");
+            LogOnce.Warn($"Injected bones that belong to no configured chain (the mesh may tear): {string.Join(", ", orphans)}");
     }
 
     private static IEnumerable<string> EnumeratePaths(Skin skin)

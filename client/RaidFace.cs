@@ -59,15 +59,11 @@ internal sealed class RaidFace
 
     internal static RaidFace Create(LoddedSkin lodded, string model)
     {
-        var morphs = new FaceMorphs(lodded, Shapes, model + " 战局表情", warnMissing: false);
-        // 两只眼（ウィンク２ / ウィンク２右）和两个喘气嘴型（あ / お）必须都有，缺任何一个 = 这张脸撑不起这套表情
+        var morphs = new FaceMorphs(lodded, Shapes, model + " raid face", warnMissing: false);
+        // 两只眼（ウィンク２ / ウィンク２右）和两个喘气嘴型（あ / お）必须都有，缺任何一个 = 这张脸撑不起这套表情；
+        // 别的键缺了（可露凯、希丽雅没有 ｷﾘｯ 这些）那一路空着，是预料之中的，不报
         if (!morphs.Has(Wink) || !morphs.Has(WinkR) || !morphs.Has(BreathCh[0]) || !morphs.Has(BreathCh[1]))
             return null;
-        var missing = new List<string>();
-        for (int c = 0; c < Shapes.Length; c++)
-            if (!morphs.Has(c))
-                missing.Add(Shapes[c]);
-        Plugin.Log.LogInfo($"[表情] {model} 挂上战局表情" + (missing.Count > 0 ? $"（头上没有 {string.Join("、", missing.ToArray())}，这几路空着）" : ""));
         return new RaidFace(morphs);
     }
 
@@ -78,7 +74,7 @@ internal sealed class RaidFace
         for (int i = 0; i < _breath.Length; i++)
             _breath[i] = new FaceSpring(BreathFadeHz, 1f);
         _morphs = morphs;
-        _blinkAt = Time.time + UnityEngine.Random.Range(2.5f, 6f);
+        _blinkAt = Time.time + UnityEngine.Random.Range(FaceBlink.GapMin, FaceBlink.GapMax);
     }
 
     /// 每帧由 MmdBlink 调（找到 Player 之后）。返回「まばたき」该是多少（0~100）。
@@ -184,7 +180,7 @@ internal sealed class RaidFace
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"[表情] 受伤事件处理异常: {e}");
+            LogOnce.Error($"[face] Damage event handler error: {e}");
         }
     }
 
@@ -219,22 +215,8 @@ internal sealed class RaidFace
         {
             _blinkStart = now;
             _blinkSlow = _level == 3;
-            _blinkAt = now + (_blinkSlow ? UnityEngine.Random.Range(4f, 8f) : UnityEngine.Random.Range(2.5f, 6f));
+            _blinkAt = now + (_blinkSlow ? UnityEngine.Random.Range(4f, 8f) : UnityEngine.Random.Range(FaceBlink.GapMin, FaceBlink.GapMax));
         }
-        return BlinkCurve(now - _blinkStart, _blinkSlow);
-    }
-
-    /// 0~1：闭眼 u² 加速合上 → 停一下 → 睁眼 (1-v)² 减速睁开。濒死眨得更慢更重。
-    private static float BlinkCurve(float u, bool slow)
-    {
-        float close = slow ? 0.12f : 0.08f, hold = slow ? 0.06f : 0.04f, open = slow ? 0.32f : 0.16f;
-        if (u < 0f || u >= close + hold + open)
-            return 0f;
-        if (u < close)
-            return (u / close) * (u / close);
-        if (u < close + hold)
-            return 1f;
-        float v = 1f - (u - close - hold) / open;
-        return v * v;
+        return FaceBlink.Curve(now - _blinkStart, _blinkSlow);
     }
 }

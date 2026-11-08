@@ -17,26 +17,7 @@ internal static class ClothingIconPatch
     {
         try
         {
-            string path = clothing.Prefab.path;
-            if (string.IsNullOrEmpty(path))
-                return true;
-            if (_pngs == null)
-            {
-                string dir = Path.Combine(Plugin.PluginDir, "icons");
-                _pngs = Directory.Exists(dir) ? Directory.GetFiles(dir, "*.png") : new string[0];
-            }
-            string best = null;
-            int bestLen = 0;
-            string lower = path.ToLowerInvariant();
-            foreach (string png in _pngs)
-            {
-                string key = Path.GetFileNameWithoutExtension(png).ToLowerInvariant();
-                if (key.Length > bestLen && lower.Contains(key))
-                {
-                    best = png;
-                    bestLen = key.Length;
-                }
-            }
+            string best = IconFor(clothing.Prefab.path);
             if (best == null)
                 return true;
             int hash = IconsHash.GetClothingHash(clothing);
@@ -55,9 +36,34 @@ internal static class ClothingIconPatch
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"服装缩略图补丁异常, 回退原生成: {e}");
+            LogOnce.Error($"Clothing icon patch error, falling back to the game's own icon: {e}");
             return true;
         }
+    }
+
+    /// 这件衣服用 icons\ 里哪张图：文件名（不分大小写）包含在包路径里、而且最长的那张（basti_upper 优先于 basti）；没有返回 null
+    private static string IconFor(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return null;
+        if (_pngs == null)
+        {
+            string dir = Path.Combine(Plugin.PluginDir, "icons");
+            _pngs = Directory.Exists(dir) ? Directory.GetFiles(dir, "*.png") : new string[0];
+        }
+        string best = null;
+        int bestLen = 0;
+        string lower = path.ToLowerInvariant();
+        foreach (string png in _pngs)
+        {
+            string key = Path.GetFileNameWithoutExtension(png).ToLowerInvariant();
+            if (key.Length > bestLen && lower.Contains(key))
+            {
+                best = png;
+                bestLen = key.Length;
+            }
+        }
+        return best;
     }
 
     /// <summary>

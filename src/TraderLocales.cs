@@ -22,17 +22,10 @@ public class TraderLocales(LocaleTable locales)
 
     static readonly string[] Suffixes = ["FullName", "FirstName", "Nickname", "Location", "Description"];
 
-    public void Apply(TraderBase trader)
-    {
-        foreach (var (code, lazyLocale) in locales.Global)
+    public void Apply(TraderBase trader) =>
+        LocaleHook.Each(locales, (code, data) =>
         {
             var values = Text.GetValueOrDefault(code, Text["en"]);
-            lazyLocale.AddTransformer(data =>
-            {
-                if (data == null) return data;
-                for (var i = 0; i < Suffixes.Length; i++) data[$"{trader.Id} {Suffixes[i]}"] = values[i];
-                return data;
-            });
-        }
-    }
+            for (var i = 0; i < Suffixes.Length; i++) data[$"{trader.Id} {Suffixes[i]}"] = values[i];
+        });
 }

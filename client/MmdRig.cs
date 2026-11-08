@@ -20,6 +20,7 @@ namespace AstralDivide.Client;
 /// 衣服可以按部位改走新做法（<see cref="ClothSway"/>，DEV_NOTES 37.31）：那些骨不建刚体，身体碰撞体照旧建（头发要用，新做法也拿它们当胶囊）。
 /// 好处是质量/尺寸/阻尼/弹簧全都能原样抄，一个换算系数都不用编。世界坐标 ↔ 布料坐标的换算见
 /// <see cref="ToCloth"/>；每个角色再错开一个大偏移，两个人贴着站也不会互相打架。
+/// 碰撞组 → 层的全局表在 <see cref="MmdLayers"/>。
 /// </summary>
 internal class MmdRig
 {
@@ -45,23 +46,11 @@ internal class MmdRig
         internal bool HasPose;
     }
 
-    private static int[] _layerOf;                           // PMX 组 → 层：身体碰撞体永远在这儿，布料平时也在这儿
-    private static int[] _clothLayerOf;                      // PMX 组 → 「布料之间互不碰撞」打开时布料待的层
-    private static int _clothMask;                           // 上面那 16 个布料层的位掩码
-
     private readonly MmdModel _m;
     private readonly Dictionary<int, Seg> _segs = new Dictionary<int, Seg>();
     private readonly List<Seg> _order = new List<Seg>();     // 按骨骼层级深度排好的写回顺序
     private readonly Dictionary<int, ConfigurableJoint> _joints = new Dictionary<int, ConfigurableJoint>();
     private readonly HashSet<int> _welded = new HashSet<int>();      // 六自由度全锁死的链关节（见 Build），放开角度跟调参台走
-    private readonly HashSet<int> _weldedChest = new HashSet<int>(); // 同上，但是胸部关节：跟调参台的「胸部」几项走（37.30）
-    private readonly Dictionary<int, ChestBase> _sprungChest = new Dictionary<int, ChestBase>();   // 原模型带弹簧的胸部关节（蕾娜）：原值，滑块按倍数缩放
-
-    /// 原模型带弹簧的胸部关节的原值（角度单位度、已按非对称补偿算好中位），调参台的倍数乘在它上面
-    private sealed class ChestBase
-    {
-        internal Vector3 Lo, Hi, Mid, LinLo, LinHi, LinSpring, AngSpring;
-    }
     private readonly Dictionary<long, PhysicMaterial> _mats = new Dictionary<long, PhysicMaterial>();
     private readonly int _slotIndex;
     private readonly Vector3 _slot;
@@ -70,7 +59,6 @@ internal class MmdRig
     private Vector3 _lastRef;
     private bool _awake;
     private int _complaints;
-    private int _asymBuilt;                                  // 本次 Link 里走了「非对称限位补偿」的关节数，只用来汇总日志
 
     /// <summary>
     /// 布料物理跑在**这个参考系**里：原点跟着角色走，**但坐标轴始终与世界对齐**。
@@ -97,7 +85,6 @@ internal class MmdRig
     private ClothSway _sway;                                 // 衣服新做法（37.31）：交给它的链不建刚体；没有就是 null
 
     internal bool Alive => _segs.Count > 0 || (_sway != null && _sway.Count > 0);
-    internal string Model => _m.Name;
     internal Transform Reference => _ref;
 
     internal MmdRig(MmdModel model)
@@ -117,8 +104,8 @@ internal class MmdRig
 
     /// 把一个部位（bundle）的刚体加进来。`owner` 用于换装时定点清理。
     /// `sway` = 这个部位里交给新做法的链（37.31，可以为 null）：它们的骨不建动态刚体，建完 PhysX 那部分再交给 <see cref="ClothSway"/>。
-    internal int AddPart(int owner, MmdSurvey survey, HashSet<string> partBones, Transform reference, string bundleKey,
-                         List<ClothSway.Input> sway = null, ClothSway.Body legs = null)
+    internal void AddPart(int owner, MmdSurvey survey, HashSet<string> partBones, Transform reference, string bundleKey,
+                          List<ClothSway.Input> sway = null, ClothSway.Body legs = null)
     {
         sway?.RemoveAll(c => c.Bones.Length < 2 && !FillTail(c, survey));   // 一节骨的胸：补不出尖端就照旧 PMX
         var handed = new HashSet<string>();
@@ -126,8 +113,7 @@ internal class MmdRig
             foreach (ClothSway.Input c in sway)
                 foreach (string n in c.Names)
                     handed.Add(n);
-        int skippedSway = 0;
-        EnsureLayers();
+        MmdLayers.Ensure();
         _upm = 1f / Mathf.Max(1e-4f, survey.MetersPerUnit);
         if (_ref == null)
             _ref = reference;
@@ -136,69 +122,61 @@ internal class MmdRig
             _framePos = _ref.position;                       // 还没建刚体，参考系直接对齐到角色身上
             _frameSet = true;
         }
+        BuildBodies(owner, survey, partBones, handed, bundleKey);
+        // ⚠️ 顺序不能换：Unity 的关节限位零点 = **AddComponent 那一瞬间两块刚体的相对姿态**。
+        // 所以必须先把骨复位到静止姿态、刚体贴上去，再建关节，零点才等于 MMD 的静止姿态。
+        Reorder();
+        Reset();
+        Link(bundleKey);
+        Anchor(bundleKey);
+        WarnFar(bundleKey);
+        if (sway != null && sway.Count > 0)
+            AddSway(sway, legs);
+    }
 
-        int made = 0, skipped = 0, proxies = 0;
+    /// <summary>
+    /// 这个部位的刚体：自己的动态刚体 + 全身共用的碰撞体（别的部位已经建过的跳过）。
+    /// 交给新做法的骨：不建会动的 PhysX 刚体。头发会碰到它的话，留一个跟着骨走的碰撞代理（kinematic），
+    /// 不然长头发（贝丝蒂的后发、阿斯缇亚的头发）会直接穿过外套 / 披风沉到身体碰撞体上（第二步加的，37.31）。
+    /// 建不起来的刚体跳过，报一次第一条原因
+    /// </summary>
+    private void BuildBodies(int owner, MmdSurvey survey, HashSet<string> partBones, HashSet<string> handed, string bundleKey)
+    {
+        int skipped = 0;
         string firstWhy = null;
         foreach (MmdBody body in _m.bodies)
         {
             if (_segs.ContainsKey(body.i))
                 continue;                                    // 别的部位已经建过（碰撞体是全身共用的）
             string bn = _m.BoneName(body.bone);
-            bool mine = bn != null && partBones.Contains(bn);
             bool collider = body.Kind == MmdBodyKind.BoneFollow;
-            if (!mine && !collider)
+            if (!collider && (bn == null || !partBones.Contains(bn)))
                 continue;                                    // 动态刚体只归它自己那个部位
-            bool proxy = false;
-            if (!collider && handed.Contains(bn))
-            {
-                // 交给新做法的骨：不建会动的 PhysX 刚体。头发会碰到它的话，留一个跟着骨走的碰撞代理（kinematic），
-                // 不然长头发（贝丝蒂的后发、阿斯缇亚的头发）会直接穿过外套 / 披风沉到身体碰撞体上（第二步加的，37.31）
-                if (!NeedsProxy(body))
-                {
-                    skippedSway++;
-                    continue;
-                }
-                proxy = true;
-            }
+            bool proxy = !collider && handed.Contains(bn);
+            if (proxy && !NeedsProxy(body))
+                continue;
             if (!survey.Resolve(body, out Transform bone, out Vector3 lp, out Quaternion lr, out string why))
             {
                 skipped++;
-                if (firstWhy == null)
-                    firstWhy = why;
+                firstWhy = firstWhy ?? why;
                 continue;
             }
             _segs[body.i] = Make(owner, body, bone, lp, lr, proxy);
-            made++;
-            if (proxy)
-                proxies++;
         }
+        if (skipped > 0)
+            LogOnce.Warn($"[mmd] {bundleKey}: {skipped} rigid bodies skipped, first reason: {firstWhy}");
+    }
 
-        // ⚠️ 顺序不能换：Unity 的关节限位零点 = **AddComponent 那一瞬间两块刚体的相对姿态**。
-        // 所以必须先把骨复位到静止姿态、刚体贴上去，再建关节，零点才等于 MMD 的静止姿态。
-        Reorder();
-        Reset();
-        int joints = Link(bundleKey);
-        Plugin.Log.LogInfo($"[mmd] {bundleKey}: 建刚体 {made}（跳过 {skipped}）、关节 {joints}；本角色累计 {_segs.Count} 刚体 / {_joints.Count} 关节"
-                           + (_welded.Count > 0 ? $"；其中 {_welded.Count} 条六自由度全锁死的链关节已放开 ±{_m.Tuning.freeAngle:0}°" : "")
-                           + (_weldedChest.Count > 0 ? $"；胸部 {_weldedChest.Count} 条锁死关节放开 ±{_m.Tuning.chestAngle:0}°" : "")
-                           + (_sprungChest.Count > 0 ? $"；胸部 {_sprungChest.Count} 条原模型弹簧关节" : ""));
-        ReportGroups(bundleKey);
-        ReportCollisionPairs(bundleKey);
-        string limbs = survey.LimbReport();
-        if (limbs != null)
-            Plugin.Log.LogInfo($"[mmd] {bundleKey}: {limbs}");
-        Anchor(bundleKey);
+    /// 布料世界里离原点太远（> 3000 单位）的刚体：float 精度不够、关节会漂。车位号没回收的时候出过（87 号车位，17540 单位）
+    private void WarnFar(string bundleKey)
+    {
         float far = 0f;
         foreach (Seg s in _segs.Values)
             if (s.Rb != null)
                 far = Mathf.Max(far, s.Rb.position.magnitude);
-        Plugin.Log.LogInfo($"[mmd] {bundleKey}: 布料世界里最远的刚体在 {far:F0} 单位处"
-                           + (far > 3000f ? "  ← ⚠ 太远了，float 精度不够，关节会漂" : "（越小精度越好）"));
-        if (skipped > 0 && firstWhy != null)
-            Plugin.Log.LogWarning($"[mmd] {bundleKey}: 跳过的第一条原因 —— {firstWhy}");
-        if (sway != null && sway.Count > 0)
-            AddSway(sway, legs, skippedSway, proxies, bundleKey);
-        return made;
+        if (far > 3000f)
+            LogOnce.Warn($"[mmd] {bundleKey}: a rigid body is {far:F0} units from the cloth world origin, too far for float precision (joints will drift)",
+                         bundleKey + "/far");
     }
 
     /// 交给新做法的布料刚体要不要留碰撞代理：PMX 规矩里它和某个还在 PhysX 里的刚体（头发 / 胸）碰得上才留；
@@ -220,33 +198,19 @@ internal class MmdRig
     // ── 衣服新做法（DEV_NOTES 37.31）────────────────────────────────────────
 
     /// 把交给新做法的链加进 <see cref="ClothSway"/>：身体碰撞体（骨骼追随刚体）换成胶囊给它用，每条链补上 PMX 的碰撞组和静止位置
-    private void AddSway(List<ClothSway.Input> inputs, ClothSway.Body legs, int skippedBodies, int proxies, string bundleKey)
+    private void AddSway(List<ClothSway.Input> inputs, ClothSway.Body legs)
     {
         if (_sway == null)
             _sway = new ClothSway(k => _m.Tuning.Part(k));
         _sway.SetBody(legs);
         _sway.SetColliders(SwayColliders());
-        int added = 0;
-        var kinds = new Dictionary<SwayKind, int>();
         foreach (ClothSway.Input c in inputs)
         {
             FillPmx(c);
-            if (!_sway.Add(c))
-                continue;
-            added++;
-            kinds.TryGetValue(c.Kind, out int k);
-            kinds[c.Kind] = k + 1;
+            _sway.Add(c);
         }
         _sway.Link(_upm);
         _sway.Reset();
-        var what = new List<string>();
-        foreach (KeyValuePair<SwayKind, int> kv in kinds)
-            what.Add((kv.Key == SwayKind.Skirt ? "裙 " : kv.Key == SwayKind.Coat ? "外套衣摆 " : kv.Key == SwayKind.Chest ? "胸部 " : "饰品 ") + kv.Value);
-        Plugin.Log.LogInfo($"[mmd] {bundleKey}: 新做法接管 {added} 条链（{string.Join("、", what.ToArray())}），PhysX 少建 {skippedBodies} 个刚体"
-                           + (proxies > 0 ? $"、{proxies} 个改成跟骨走的碰撞代理（给头发碰）；" : "；")
-                           + $"本角色新做法共 {_sway.Count} 条链 / {_sway.BoneCount} 根骨，身体胶囊 {_sway.ColCount} 个，相邻链 {_sway.PairCount} 对，"
-                           + (_sway.LegsReady ? "腿带动就绪" : "⚠ 找不到胯 / 大腿，只跟挂点走")
-                           + $"，转身参照 {(legs?.Root != null ? legs.Root.name : "无")}");
     }
 
     /// 身体碰撞体 → 胶囊（球 = 半长 0；盒子 = 沿最长边、半径取第二长的半边长）。只要真·骨骼追随的（Anchor 兜底转过来的布料不算）
@@ -264,11 +228,12 @@ internal class MmdRig
                 half = Mathf.Max(0f, size.y) * 0.5f;
             else if (b.shape == "Box")
                 BoxAsCapsule(size, out axis, out r, out half);
+            Vector3 pmxAxis = b.Rot * axis;
             list.Add(new ClothSway.Col
             {
                 Bone = s.Bone, LocalPos = s.LocalPos, LocalRot = s.LocalRot, Axis = axis,
                 Radius = r / _upm, Half = half / _upm, Group = Mathf.Clamp(b.group, 0, 15), Mask = b.collidesWith,
-                PmxCenter = b.Pos, PmxAxis = b.Rot * axis, PmxRadius = r, PmxHalf = half,
+                PmxA = b.Pos + pmxAxis * half, PmxB = b.Pos - pmxAxis * half, PmxRadius = r,
             });
         }
         return list;
@@ -290,11 +255,11 @@ internal class MmdRig
     /// 以前整条按第一块算 → 带子整条不碰手臂，改软往下垂以后会穿过手臂
     private void FillPmx(ClothSway.Input c)
     {
-        MmdBody first = FirstBody(c);
+        MmdBody first = ChainBodies(c, out int mask);
         if (first != null)
         {
             c.Group = Mathf.Clamp(first.group, 0, 15);
-            c.Mask = MaskUnion(c);
+            c.Mask = mask;
         }
         bool tail = c.Tail.sqrMagnitude > 1e-6f && first != null;
         c.PmxPos = new Vector3[c.Names.Length + (tail ? 1 : 0)];
@@ -304,29 +269,21 @@ internal class MmdRig
             c.PmxPos[c.Names.Length] = first.Pos;
     }
 
-    private MmdBody FirstBody(ClothSway.Input c)
+    /// 链上的 PMX 动态刚体：返回第一个（没有 = null），mask = 它们碰撞掩码的并集（一次遍历拿到两样）
+    private MmdBody ChainBodies(ClothSway.Input c, out int mask)
     {
         var names = new HashSet<string>(c.Names);
+        MmdBody first = null;
+        mask = 0;
         foreach (MmdBody b in _m.bodies)
         {
             string bn = _m.BoneName(b.bone);
-            if (b.Kind != MmdBodyKind.BoneFollow && bn != null && names.Contains(bn))
-                return b;
+            if (b.Kind == MmdBodyKind.BoneFollow || bn == null || !names.Contains(bn))
+                continue;
+            first = first ?? b;
+            mask |= b.collidesWith;
         }
-        return null;
-    }
-
-    private int MaskUnion(ClothSway.Input c)
-    {
-        var names = new HashSet<string>(c.Names);
-        int mask = 0;
-        foreach (MmdBody b in _m.bodies)
-        {
-            string bn = _m.BoneName(b.bone);
-            if (b.Kind != MmdBodyKind.BoneFollow && bn != null && names.Contains(bn))
-                mask |= b.collidesWith;
-        }
-        return mask;
+        return first;
     }
 
     /// <summary>
@@ -335,7 +292,7 @@ internal class MmdRig
     /// </summary>
     private bool FillTail(ClothSway.Input c, MmdSurvey survey)
     {
-        MmdBody b = FirstBody(c);
+        MmdBody b = ChainBodies(c, out int _);
         if (b == null || !survey.Resolve(b, out Transform bone, out Vector3 lp, out Quaternion _, out string _) || bone != c.Bones[0])
             return false;
         if (lp.sqrMagnitude < 0.005f * 0.005f)
@@ -343,8 +300,6 @@ internal class MmdRig
         c.Tail = lp;
         return true;
     }
-
-    internal int SwayCount(SwayKind kind) => _sway != null ? _sway.CountKind(kind) : 0;
 
     /// 每帧一次（PhysWorld.Tick 里 PhysX 写回之后）。睡着（距离剔除）的角色不算
     internal void SwayTick(float dt)
@@ -354,173 +309,14 @@ internal class MmdRig
     }
 
     /// <summary>
-    /// PMX 的 16 个碰撞组要落到 Unity 的层上，但**游戏自己的层碰撞矩阵**把一大堆层对关掉了
-    /// （贝丝蒂实机：0×1 0×2 0×4 0×5 2×4 2×5 2×8 4×8 5×8 全被挡）。
-    ///
-    /// 首版把组号直接当层号、指望 `includeLayers` 去强行覆盖矩阵 —— 那是在赌一个不确定的行为。
-    /// 现在改成**先扫出一组「彼此之间矩阵全开」的层**再映射，
-    /// 于是只需要用 `excludeLayers`（方向明确、优先级最高）去实现 PMX 的「不碰」规则，不用赌了。
-    /// </summary>
-    private static void EnsureLayers()
-    {
-        if (_layerOf != null)
-            return;
-        var pool = new List<int>();
-        for (int layer = 0; layer < 32 && pool.Count < 16; layer++)
-        {
-            if (Physics.GetIgnoreLayerCollision(layer, layer))
-                continue;                                    // 连自己都不碰的层，不能用
-            bool ok = true;
-            foreach (int p in pool)
-                if (Physics.GetIgnoreLayerCollision(layer, p))
-                {
-                    ok = false;
-                    break;
-                }
-            if (ok)
-                pool.Add(layer);
-        }
-        // ⚠️ **16 个组必须各占各的层，一个都不许撞车。**
-        // 首版 `pool` 装不下的组直接拿组号当层号（`_layerOf[g] = g`），而 pool 挑出来的层号
-        // 恰恰也在 0~15 里 —— 阿斯缇亚实机：pool = [0,3,6,7,8]，于是
-        //   组2 → pool[2] = 层6，组6 → fallback 层6   ← 两个组挤进同一层
-        //   组3 → pool[3] = 层7，组7 → fallback 层7   ← 又一次
-        // exclude 是按**层**下的：组6 排掉层6，连带把组2 一起排掉了。
-        // 组2 里装的正是 `下半身SkirtBlock` —— 挡裙子穿胯的那个碰撞体，于是腿直接穿过裙子。
-        // 躯干/腿的组7 撞上组3 同理，袖子也一样。所以 fallback 要**避开 pool 已占的层**。
-        _layerOf = new int[16];
-        var taken = new HashSet<int>(pool);
-        for (int g = 0; g < 16; g++)
-        {
-            if (g < pool.Count)
-            {
-                _layerOf[g] = pool[g];
-                continue;
-            }
-            // 先要「自己能碰自己」的层；EFT 里满足这条的只有 8 个（实测 0,3,6,7,8,12,18,23），
-            // 用光了就**退而求其次拿任何没被占的层**——绝不能退回「组号当层号」，那正是撞车的来源。
-            // 同层只会出现在同组之间，碰不碰由 include/exclude 说了算（实测 include 能压过矩阵）。
-            int layer = FreeLayer(taken, true);
-            if (layer < 0)
-                layer = FreeLayer(taken, false);
-            _layerOf[g] = layer < 0 ? g : layer;              // 32 个层全占满了才认命
-            taken.Add(_layerOf[g]);
-        }
-        AssignClothLayers(taken);
-        // Info 不是 Warning：EFT 的层矩阵永远只扫得出 5 个全开层，这行每局必打，是常态不是故障（Tech Leader 2026-10-01 定）。
-        if (pool.Count < 16)
-            Plugin.Log.LogInfo($"[mmd] 只找到 {pool.Count} 个彼此全开的层（要 16 个），"
-                               + "多出来的碰撞组分到了矩阵未必全开的层，靠 includeLayers 强开");
-        int distinct = new HashSet<int>(_layerOf).Count;
-        Plugin.Log.LogInfo($"[mmd] 碰撞组 → 层映射：{string.Join(",", System.Array.ConvertAll(_layerOf, x => x.ToString()))}"
-                           + $"（前 {pool.Count} 组的层两两全开；16 组占了 {distinct} 个不同的层）；"
-                           + $"互不碰撞模式的布料层：{string.Join(",", System.Array.ConvertAll(_clothLayerOf, x => x.ToString()))}");
-        if (distinct < 16)
-            Plugin.Log.LogError("[mmd] ⚠ 有碰撞组共用了同一个层 —— 一个组的 exclude 会连累另一个组，"
-                                + "布料会莫名穿模（2026-08-26 腿穿裙子就是这么来的）");
-    }
-
-    /// <summary>
-    /// 给「布料之间互不碰撞」模式准备布料层：**每个 PMX 组的布料各占一个自己的层**，用的是组层挑剩下的那 16 个。
-    ///
-    /// ⚠️ 首版把所有布料挤进同一个层（借第 15 组的）。布料自己那一侧没问题，但**身体碰撞体那一侧**的 PMX 规矩是
-    /// 按「布料原来在哪个组」写的 —— 布料都挤到一起之后，身体只能看自己掩码的第 15 位，等于换了一条规矩：
-    /// 可露凯两个专门挡头发的 `上半身2Block` / `下半身Block`（掩码 0x0040 = 只和第 6 组碰）从此和头发不碰（丢 200 对），
-    /// 蕾娜的手臂反而开始推外套和裙子（多 1518 对）。2026-10-01 审查时拿 raw 逐对算出来的。
-    /// 布料按组分层之后，身体照旧按组表态，两边都同意才碰 —— 和关着这个开关时是同一条 PMX 规矩，只少了布料互撞。
-    /// </summary>
-    private static void AssignClothLayers(HashSet<int> taken)
-    {
-        var spare = new List<int>();
-        for (int layer = 0; layer < 32; layer++)
-            if (!taken.Contains(layer))
-                spare.Add(layer);
-        _clothLayerOf = new int[16];
-        _clothMask = 0;
-        for (int g = 0; g < 16; g++)
-        {
-            // 组层最多占 16 个，所以剩下的至少有 16 个；真不够（32 层全满，理论上到不了）就退回组层，等于这组不分家。
-            _clothLayerOf[g] = g < spare.Count ? spare[g] : _layerOf[g];
-            if (g < spare.Count)
-                _clothMask |= 1 << spare[g];
-        }
-    }
-
-    /// 找一个还没被占的层。<paramref name="selfCollide"/> = 只要「自己能碰自己」的层。找不到返回 -1。
-    private static int FreeLayer(HashSet<int> taken, bool selfCollide)
-    {
-        for (int layer = 0; layer < 32; layer++)
-            if (!taken.Contains(layer) && (!selfCollide || !Physics.GetIgnoreLayerCollision(layer, layer)))
-                return layer;
-        return -1;
-    }
-
-    private void ReportGroups(string bundleKey)
-    {
-        var used = new List<int>();
-        foreach (Seg s in _segs.Values)
-        {
-            int g = Mathf.Clamp(_m.bodies[s.Body].group, 0, 15);
-            if (!used.Contains(g))
-                used.Add(g);
-        }
-        used.Sort();
-        Plugin.Log.LogInfo($"[mmd] {bundleKey}: 用到的碰撞组 [{string.Join(",", used.ConvertAll(x => x.ToString()).ToArray())}]");
-    }
-
-    /// <summary>
-    /// 诊断：把**实际建出来的**布料层和身体层逐对查一遍，看它们到底碰不碰得上。
-    ///
-    /// 2026-08-26 阿斯缇亚实机：腿穿裙子、手臂穿袖子，可拟合残差是 0.00 mm、刚体一个没跳过 ——
-    /// 数据侧干净，怀疑是碰撞组落到了被游戏层矩阵挡住的层上（它只扫得出 5 个全开层，阿斯缇亚要 8 组）。
-    /// 与其继续猜，不如把矩阵/include/exclude 三个因子逐对打出来。
-    /// </summary>
-    private void ReportCollisionPairs(string bundleKey)
-    {
-        var cloth = new Dictionary<int, Collider>();
-        var body = new Dictionary<int, Collider>();
-        foreach (Seg s in _segs.Values)
-        {
-            Collider col = s.Rb == null ? null : s.Rb.GetComponent<Collider>();
-            if (col == null)
-                continue;
-            var map = s.TrueKind == MmdBodyKind.BoneFollow ? body : cloth;
-            if (!map.ContainsKey(col.gameObject.layer))
-                map[col.gameObject.layer] = col;
-        }
-        int ok = 0;
-        var lines = new List<string>();
-        foreach (KeyValuePair<int, Collider> c in cloth)
-            foreach (KeyValuePair<int, Collider> b in body)
-            {
-                int cBit = 1 << b.Key, bBit = 1 << c.Key;
-                bool matrix = !Physics.GetIgnoreLayerCollision(c.Key, b.Key);
-                bool inc = (c.Value.includeLayers.value & cBit) != 0
-                           || (b.Value.includeLayers.value & bBit) != 0;
-                bool exc = (c.Value.excludeLayers.value & cBit) != 0
-                           || (b.Value.excludeLayers.value & bBit) != 0;
-                bool hit = (matrix || inc) && !exc;
-                if (hit)
-                {
-                    ok++;
-                    continue;                    // 能碰的不逐条报 —— 汇总行里的数字就够了
-                }
-                lines.Add($"布料层{c.Key}×身体层{b.Key} 挡住"
-                          + $"（矩阵{(matrix ? "开" : "关")} include{(inc ? "有" : "无")} exclude{(exc ? "有" : "无")}）");
-            }
-        Plugin.Log.LogInfo($"[mmd] {bundleKey}: 布料层 {cloth.Count} 个 × 身体层 {body.Count} 个 —— "
-                           + $"{ok} 对能碰 / {lines.Count} 对被挡");
-        foreach (string l in lines)
-            Plugin.Log.LogInfo("[mmd]   " + l);
-    }
-
-    /// <summary>
     /// **没有任何关节连着的动态刚体，一律改成骨骼追随。**
     ///
     /// 一个动态刚体如果一条 joint 都没接上，它就只剩重力 —— 直接自由落体，
     /// 把蒙在它上面的顶点拉成一条几十米的黑刺（2026-08-23 贝丝蒂的蝴蝶结实锤）。
     /// 这种情况的根因通常是**它的固定端刚体没建起来**，而那往往是数据/映射问题；
     /// 这里做的是兜底：宁可这几根骨不动，也绝不让它们飞出去。
+    /// ⚠️ 必须可逆：head 先建时 upper 的刚体还不存在，同一根骨可能这一轮"孤立"、
+    /// 下一轮就接上关节了。钉死不还原的话就永久不动了。
     /// </summary>
     private void Anchor(string bundleKey)
     {
@@ -536,28 +332,17 @@ internal class MmdRig
         {
             if (s.TrueKind == MmdBodyKind.BoneFollow || s.Rb == null)
                 continue;
-            // ⚠️ 必须可逆：head 先建时 upper 的刚体还不存在，同一根骨可能这一轮"孤立"、
-            // 下一轮就接上关节了。钉死不还原的话就永久不动了。
-            if (linked.Contains(s.Body))
-            {
-                if (s.Kind == s.TrueKind)
-                    continue;
-                s.Kind = s.TrueKind;
-                s.Rb.isKinematic = false;
-                s.Rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
-                continue;
-            }
-            if (s.Kind == MmdBodyKind.BoneFollow)
-                continue;
-            s.Kind = MmdBodyKind.BoneFollow;
-            s.Rb.isKinematic = true;
-            s.Rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
-            loose.Add(_m.bodies[s.Body].name);
+            bool pin = !linked.Contains(s.Body);
+            if (pin == (s.Kind == MmdBodyKind.BoneFollow))
+                continue;                                    // 已经是该有的样子
+            s.Kind = pin ? MmdBodyKind.BoneFollow : s.TrueKind;
+            SetKinematic(s.Rb, pin);
+            if (pin)
+                loose.Add(_m.bodies[s.Body].name);
         }
         if (loose.Count > 0)
-            Plugin.Log.LogWarning($"[mmd] {bundleKey}: {loose.Count} 个动态刚体一条关节都没接上，"
-                                  + $"已改成骨骼追随防止自由落体 —— {string.Join(" ", loose.ToArray())}。"
-                                  + "多半是它们的固定端刚体没建起来，去查那一头");
+            LogOnce.Warn($"[mmd] {bundleKey}: {loose.Count} dynamic rigid bodies have no joint and were pinned to their bones so they don't fall: "
+                         + string.Join(" ", loose.ToArray()) + ". Usually the body they hang from was not built - check that end");
     }
 
     /// `proxy` = 衣服新做法的碰撞代理（37.31）：当骨骼追随体建（kinematic、每步贴到骨上、不写回骨），层和碰撞规矩照它原来的布料身份
@@ -576,75 +361,53 @@ internal class MmdRig
             RestLocalPos = bone.localPosition,
             RestLocalRot = bone.localRotation,
             Depth = Depth(bone),
+            BaseDrag = ToDrag(body.linearDamping),
+            BaseAngDrag = ToDrag(body.angularDamping),
         };
-
         var go = new GameObject("bds_" + (body.name ?? body.i.ToString()));
-        go.layer = _layerOf[Mathf.Clamp(body.group, 0, 15)];
         go.transform.SetPositionAndRotation(ToCloth(WorldPos(seg)), WorldRot(seg));
         PhysWorld.Adopt(go);
-        AddCollider(go, body);
-
+        AddCollider(go, body);                               // 层也在这里定（MmdLayers.Apply）
         var rb = go.AddComponent<Rigidbody>();
         rb.useGravity = false;                               // 重力我们自己加，见 PhysWorld（Unity 的是全局的，动不得）
-        rb.isKinematic = seg.Kind == MmdBodyKind.BoneFollow;
-        rb.mass = MassOf(body);
-        seg.BaseDrag = ToDrag(body.linearDamping);
-        seg.BaseAngDrag = ToDrag(body.angularDamping);
-        rb.drag = seg.BaseDrag * _m.Tuning.damping * DragScale(body.i);
-        rb.angularDrag = seg.BaseAngDrag * _m.Tuning.damping * DragScale(body.i);
         rb.interpolation = RigidbodyInterpolation.None;
-        // 裙板只有 8~10 mm 厚，Discrete 在角色跑动时会被直接穿过去（这就是"穿模"）。
-        // Speculative 连续检测对薄物体便宜又有效；骨骼追随体是 kinematic，保持 Discrete。
-        rb.collisionDetectionMode = rb.isKinematic
-            ? CollisionDetectionMode.Discrete
-            : CollisionDetectionMode.ContinuousSpeculative;
         rb.sleepThreshold = 0f;                              // MMD 的布料永远不睡
-        rb.maxAngularVelocity = _m.Tuning.maxSpin;
-        // ⚠️ 「顶飞」的真凶：两块布料压在一起时 PhysX 会强行把它们推开，
-        // Unity 默认上限 10 单位/s ≈ 1 m/s。蹲下时外套和裙子被躯干挤到一起，穿透一深就弹飞。
-        rb.maxDepenetrationVelocity = _m.Tuning.separate;
-        rb.solverIterations = _m.Tuning.solverIters;
-        rb.solverVelocityIterations = Mathf.Max(1, _m.Tuning.solverIters / 3);
+        SetKinematic(rb, seg.Kind == MmdBodyKind.BoneFollow);
         seg.Rb = rb;
+        ApplyBody(seg);
         return seg;
     }
 
     /// <summary>
-    /// PMX 的碰撞组 → Unity 的层。第 n 位 = 1 表示「和第 n 组碰撞」。
-    ///
-    /// 层是 <see cref="EnsureLayers"/> 挑出来的「矩阵里两两全开」的一组，所以只要把不该碰的排掉就行。
-    /// exclude 是**逐碰撞体**的，两边各排一次，正好等于 PMX 那条「双方都同意才碰」的规矩。
-    /// ⚠️ 两道保险都要：EFT 的碰撞矩阵很严，实机只扫得出 **5 个**彼此全开的层（要 16 个），
-    /// 剩下的组只能退回「组号当层号」，那些层多半被矩阵挡着 —— 所以 include（强开）不能撤，
-    /// exclude（强关）才是 PMX 规矩的执行者。
-    ///
+    /// 刚体上跟手感参数有关的几项：建的时候设一次，开发版调参台拖滑块时再刷一次（两条路共用这一份，2026-11-09 并的）。
+    /// 质量 / 阻尼只给布料设 —— 按「是不是布料」判，别按 isKinematic：被距离剔除冻住的布料也是 kinematic；骨骼追随体是 kinematic，PhysX 不看它的质量
     /// </summary>
-    private void Layers(GameObject go, Collider col, MmdBody body)
+    private void ApplyBody(Seg s)
     {
-        bool cloth = body.Kind != MmdBodyKind.BoneFollow;
-        int include = 0, exclude = 0;
-        for (int g = 0; g < 16; g++)
-        {
-            // 第 g 组的东西可能在两个层上：组层，或者（开了互不碰撞的布料）布料层。
-            // 身体碰撞体两个都要表态，同一个答案；布料只会遇到组层上的身体，布料层另算（见下）。
-            int bit = 1 << _layerOf[g];
-            if (!cloth)
-                bit |= 1 << _clothLayerOf[g];
-            if (((body.collidesWith >> g) & 1) != 0)
-                include |= bit;
-            else
-                exclude |= bit;
-        }
-        // 「布料之间互不碰撞」：动态刚体挪到**它那一组自己的布料层**，并把全部布料层排掉 —— 于是它们彼此穿过，
-        // 而和身体（骨骼追随体，还在各自的组层上）之间仍是 PMX 那条「双方都同意才碰」，一对都不多、一对都不少。
-        // 这就是真·布料模拟解决"外套和裙子打架"的做法，只是我们保留了 PMX 的限位和 Box 碰撞体。
-        bool noSelf = _m.Tuning.clothNoSelf && cloth;
-        int group = Mathf.Clamp(body.group, 0, 15);
-        go.layer = noSelf ? _clothLayerOf[group] : _layerOf[group];
-        if (noSelf)
-            exclude |= _clothMask;
-        col.includeLayers = include;
-        col.excludeLayers = exclude;
+        MmdTuning t = _m.Tuning;
+        Rigidbody rb = s.Rb;
+        rb.maxAngularVelocity = t.maxSpin;
+        // ⚠️ 「顶飞」的真凶：两块布料压在一起时 PhysX 会强行把它们推开，
+        // Unity 默认上限 10 单位/s ≈ 1 m/s。蹲下时外套和裙子被躯干挤到一起，穿透一深就弹飞。
+        rb.maxDepenetrationVelocity = t.separate;
+        rb.solverIterations = t.solverIters;
+        rb.solverVelocityIterations = Mathf.Max(1, t.solverIters / 3);
+        if (s.Kind == MmdBodyKind.BoneFollow)
+            return;
+        rb.mass = MassOf(_m.bodies[s.Body]);
+        rb.drag = s.BaseDrag * t.damping;
+        rb.angularDrag = s.BaseAngDrag * t.damping;
+    }
+
+    /// <summary>
+    /// kinematic 和碰撞检测方式成对改（建、Anchor 兜底、距离剔除冻住 / 解冻都走这里）：
+    /// 裙板只有 8~10 mm 厚，Discrete 在角色跑动时会被直接穿过去（这就是"穿模"）。
+    /// Speculative 连续检测对薄物体便宜又有效；kinematic 的（骨骼追随体、冻住的布料）用 Discrete。
+    /// </summary>
+    private static void SetKinematic(Rigidbody rb, bool on)
+    {
+        rb.isKinematic = on;
+        rb.collisionDetectionMode = on ? CollisionDetectionMode.Discrete : CollisionDetectionMode.ContinuousSpeculative;
     }
 
     /// PMX 形状 → Unity 碰撞体。尺寸直接就是 PMX 数值 —— 布料世界的单位就是 PMX 单位。
@@ -675,7 +438,7 @@ internal class MmdRig
 
         col.material = Material(body);
 
-        Layers(go, col, body);
+        MmdLayers.Apply(go, col, body, _m.Tuning.clothNoSelf);
         // ⚠️ **千万别调小 contactOffset**：动态刚体用的是 `ContinuousSpeculative`，
         // 而 Unity 里 contactOffset 就是**投机 CCD 的预测余量** —— 调小等于把防穿隧关掉。
         // 2026-08-23 我把它设成 0.004 想减少"虚假排斥"，结果穿隧回来、裙板互相穿过卡住，
@@ -726,12 +489,12 @@ internal class MmdRig
 
     // ── 关节 ──────────────────────────────────────────────────────────────
 
-    private int Link(string bundleKey)
+    /// 两头刚体都在了的关节建起来（另一头还没建的等它的部位加载了再补）。
+    /// 对账：这两块刚体在游戏里的相对姿态和 PMX 里的差多少 —— 关节的零点就是在这一刻被锁死的，差 5° 以上说明落位或拟合有问题，报一次
+    private void Link(string bundleKey)
     {
-        int n = 0;
         float worst = 0f;
         string worstName = null;
-        _asymBuilt = 0;
         foreach (MmdJoint j in _m.joints)
         {
             if (_joints.ContainsKey(j.i))
@@ -742,22 +505,15 @@ internal class MmdRig
                 continue;
             if ((a.Proxy || b.Proxy) && a.TrueKind == MmdBodyKind.BoneFollow && b.TrueKind == MmdBodyKind.BoneFollow)
                 continue;                                    // 两头都跟骨走（新做法的碰撞代理），关节没用（37.31）
-
-            // 对账：这两块刚体在游戏里的相对姿态，和它们在 PMX 里的相对姿态差多少。
-            // 差得多说明落位或拟合有问题 —— 关节的零点就是在这一刻被锁死的，这里错后面全错。
             Quaternion want = Quaternion.Inverse(_m.bodies[j.bodyA].Rot) * _m.bodies[j.bodyB].Rot;
             Quaternion have = Quaternion.Inverse(a.Rb.rotation) * b.Rb.rotation;
             float off = Quaternion.Angle(want, have);
             if (off > worst) { worst = off; worstName = j.name; }
-
             _joints[j.i] = Build(j, a.Rb, b.Rb);
-            n++;
         }
-        if (n > 0)
-            Plugin.Log.LogInfo($"[mmd] {bundleKey}: 关节零点对账，最大偏差 {worst:F2}°（{worstName}）"
-                               + (worst > 5f ? "  ← ⚠ 偏大，检查拟合残差" : "")
-                               + (_asymBuilt > 0 ? $"；{_asymBuilt} 条非对称限位已用中位建关节补偿" : ""));
-        return n;
+        if (worst > 5f)
+            LogOnce.Warn($"[mmd] {bundleKey}: joint rest pose is off by up to {worst:F2}° ({worstName}), check the fit residuals",
+                         bundleKey + "/joints");
     }
 
     private ConfigurableJoint Build(MmdJoint j, Rigidbody a, Rigidbody b)
@@ -768,38 +524,53 @@ internal class MmdRig
         Quaternion invB = Quaternion.Inverse(pb.Rot);
         Vector3 anchor = invB * (j.Pos - pb.Pos);            // PMX 单位 = 布料世界单位，直接用
         Quaternion frame = invB * j.Rot;
-
         Vector3 lo = Vec.Of(j.angMin) * Mathf.Rad2Deg;
         Vector3 hi = Vec.Of(j.angMax) * Mathf.Rad2Deg;
-        // ⚠️ 六个自由度全锁死（平移 0/0、角度 0/0、无弹簧）= 焊死，物理链上不可能是作者本意。
-        //    可露凯 111 条 joint 里 102 条是这样：它在 MMD 里能甩，全靠 1e16 的质量把 Bullet 的约束压软——
-        //    靠的是求解器误差。贝丝蒂的裙子关节角度也全锁，但平移有 ±1 单位，靠平移在摆，所以没事。
-        //    这里放开成 ±freeAngle（调参台「锁死关节放开角度」，默认 45°），阻尼照 SetSprings 走。
-        //    胸部关节（37.30）用调参台「胸部摆动角度」，不跟头发的放开角度走
-        bool chest = _m.ChestJoints.Contains(j.i);
-        float release = chest ? _m.Tuning.chestAngle : _m.Tuning.freeAngle;
-        bool welded = release > 0f && !b.isKinematic && j.Welded;
-        if (welded)
-        {
-            lo = -Vector3.one * release;
-            hi = Vector3.one * release;
-            (chest ? _weldedChest : _welded).Add(j.i);
-        }
+        bool welded = Unweld(j, b, ref lo, ref hi);
         Vector3 mid = Mid(lo, hi);
 
         // ── 非对称限位补偿 ──
         // Unity 的 Y/Z 只能写「±一个数」，写不了「外 30 内 10」。而 Unity 的限位零点 =
         // **AddComponent 那一瞬间两块刚体的相对姿态**。所以先把子刚体摆到限位区间的中点上，
         // 建完关节再摆回去，零点就被挪到中点了，±半宽正好等于原来的不对称区间。
-        // ⚠️ 贝丝蒂 643 条 joint 全是对称的，这条分支在她身上一次都不会走 —— 等 OTs-14 实机验证。
         Quaternion save = b.transform.rotation;
         bool shifted = mid.sqrMagnitude > 1e-6f;
         if (shifted)
-        {
             b.transform.rotation = save * (frame * Quaternion.Euler(mid) * Quaternion.Inverse(frame));
-            _asymBuilt++;                                    // 不逐条报了（ots14 一穿就是 26 行黄字），Link 汇总成一句
-        }
 
+        ConfigurableJoint cj = NewJoint(a, b, anchor, frame);
+        SetLinear(cj, Vec.Of(j.linMin), Vec.Of(j.linMax));
+        SetAngular(cj, lo, hi, mid);
+        SetSprings(cj, Vec.Of(j.linSpring), Vec.Of(j.angSpring), _m.Tuning.springDamper);
+        if (welded)
+            WeldSpring(cj, b.mass);
+
+        if (shifted)
+            b.transform.rotation = save;
+        cj.connectedAnchor = a.transform.InverseTransformPoint(b.transform.TransformPoint(anchor));
+        return cj;
+    }
+
+    /// <summary>
+    /// ⚠️ 六个自由度全锁死（平移 0/0、角度 0/0、无弹簧）= 焊死，物理链上不可能是作者本意。
+    /// 可露凯 111 条 joint 里 102 条是这样：它在 MMD 里能甩，全靠 1e16 的质量把 Bullet 的约束压软——
+    /// 靠的是求解器误差。贝丝蒂的裙子关节角度也全锁，但平移有 ±1 单位，靠平移在摆，所以没事。
+    /// 这里放开成 ±freeAngle（调参台「锁死关节放开角度」，默认 45°），阻尼照 SetSprings 走。放开了返回 true
+    /// </summary>
+    private bool Unweld(MmdJoint j, Rigidbody b, ref Vector3 lo, ref Vector3 hi)
+    {
+        float release = _m.Tuning.freeAngle;
+        if (release <= 0f || b.isKinematic || !j.Welded)
+            return false;
+        lo = -Vector3.one * release;
+        hi = Vector3.one * release;
+        _welded.Add(j.i);
+        return true;
+    }
+
+    /// 关节本体：挂在子刚体 B 上、连父刚体 A，锚点 / 轴按 PMX 关节的坐标系；两端不互撞；防拉散照 tuning
+    private ConfigurableJoint NewJoint(Rigidbody a, Rigidbody b, Vector3 anchor, Quaternion frame)
+    {
         var cj = b.gameObject.AddComponent<ConfigurableJoint>();
         cj.connectedBody = a;
         cj.autoConfigureConnectedAnchor = false;
@@ -811,29 +582,6 @@ internal class MmdRig
         cj.projectionMode = _m.Tuning.projection ? JointProjectionMode.PositionAndRotation : JointProjectionMode.None;
         cj.projectionDistance = 0.2f;
         cj.projectionAngle = 25f;
-
-        if (chest && !welded)
-        {
-            var c = new ChestBase
-            {
-                Lo = lo, Hi = hi, Mid = mid, LinLo = Vec.Of(j.linMin), LinHi = Vec.Of(j.linMax),
-                LinSpring = Vec.Of(j.linSpring), AngSpring = Vec.Of(j.angSpring),
-            };
-            _sprungChest[j.i] = c;
-            ApplySprungChest(cj, c);
-        }
-        else
-        {
-            SetLinear(cj, Vec.Of(j.linMin), Vec.Of(j.linMax));
-            SetAngular(cj, lo, hi, mid);
-            SetSprings(cj, Vec.Of(j.linSpring), Vec.Of(j.angSpring), _m.Tuning.springDamper);
-        }
-        if (welded)
-            WeldSpring(cj, b.mass, chest);
-
-        if (shifted)
-            b.transform.rotation = save;
-        cj.connectedAnchor = a.transform.InverseTransformPoint(b.transform.TransformPoint(anchor));
         return cj;
     }
 
@@ -843,33 +591,19 @@ internal class MmdRig
     /// 这里用角弹簧复现：目标 = 静止姿态（Unity 关节零点就是建关节那一刻 = 静止姿态），
     /// 刚度按子刚体质量配（链上质量逐节减半，按质量配才能整条链一个频率），阻尼比走「弹簧阻尼」滑块（I ≈ 0.1·m，球半径 0.5 单位）。
     /// </summary>
-    private void WeldSpring(ConfigurableJoint cj, float mass, bool chest)
+    private void WeldSpring(ConfigurableJoint cj, float mass)
     {
         MmdTuning t = _m.Tuning;
-        float k = (chest ? t.chestSpring : t.weldSpring) * mass;
-        // 阻尼 = 阻尼比 × 临界阻尼（2√(k·I)，I ≈ 0.1·m）。阻尼比用「弹簧阻尼」滑块（胸部用「胸部阻尼比」）：
+        float k = t.weldSpring * mass;
+        // 阻尼 = 阻尼比 × 临界阻尼（2√(k·I)，I ≈ 0.1·m）。阻尼比用「弹簧阻尼」滑块：
         // 1 = 临界（刚好不冲过头），2.2（默认）= 过阻尼，转头时头发慢慢跟上、不甩。
         // ⚠️ 首版取 0.7（欠阻尼）：视角一转，弹簧把头发猛拽到新位置、梢部冲过头再弹回，看着像加速甩（2026-08-27 实机）。
-        float c = Mathf.Max(0.1f, chest ? t.chestDamper : t.springDamper) * 2f * Mathf.Sqrt(k * 0.1f * mass);
+        float c = Mathf.Max(0.1f, t.springDamper) * 2f * Mathf.Sqrt(k * 0.1f * mass);
         cj.rotationDriveMode = RotationDriveMode.XYAndZ;
         cj.targetRotation = Quaternion.identity;
         cj.angularXDrive = new JointDrive { positionSpring = k, positionDamper = c, maximumForce = float.MaxValue };
         cj.angularYZDrive = new JointDrive { positionSpring = k, positionDamper = c, maximumForce = float.MaxValue };
     }
-
-    /// 原模型带弹簧的胸部关节（蕾娜，37.30）：限位绕中位按「胸部摆动幅度」缩放（0 = 锁住不动），弹簧乘「胸部回弹」，阻尼乘「胸部阻尼」。
-    /// 建关节和调参台实时刷新都走这里，两条路算出同一个物理
-    private void ApplySprungChest(ConfigurableJoint cj, ChestBase c)
-    {
-        MmdTuning t = _m.Tuning;
-        float r = t.chestRange;
-        SetLinear(cj, c.LinLo * r, c.LinHi * r);
-        SetAngular(cj, c.Mid + (c.Lo - c.Mid) * r, c.Mid + (c.Hi - c.Mid) * r, c.Mid);
-        SetSprings(cj, c.LinSpring * t.chestSpringScale, c.AngSpring * t.chestSpringScale, t.springDamper * t.chestDampScale);
-    }
-
-    /// 刚体阻尼的额外倍数：原模型带弹簧的胸部刚体乘「胸部阻尼」，别的 1
-    private float DragScale(int body) => _m.ChestSprung && _m.ChestBodies.Contains(body) ? _m.Tuning.chestDampScale : 1f;
 
     private static Vector3 Mid(Vector3 lo, Vector3 hi)
     {
@@ -1002,10 +736,14 @@ internal class MmdRig
         _lastRefPos = now;
     }
 
+#if SORA_DEV
+    internal string Model => _m.Name;
 
+    /// 调参台那行「这套身上有几条」
+    internal int SwayCount(SwayKind kind) => _sway != null ? _sway.CountKind(kind) : 0;
 
     /// <summary>
-    /// 把本模型 tuning 里的每一个数重新刷到已经建好的刚体和关节上 —— **调参台拖滑块时实时生效**。
+    /// 把本模型 tuning 里的每一个数重新刷到已经建好的刚体和关节上 —— **调参台拖滑块时实时生效**（开发版）。
     ///
     /// 能这么做的前提，也正是「每套模型独立」能成立的原因：这些参数全都写在**刚体/关节**上，
     /// 运行时改一下就生效。写在**物理场景**上的（步频）才做不到，所以那个留在全局。
@@ -1017,37 +755,22 @@ internal class MmdRig
         {
             if (s.Rb == null)
                 continue;
-            s.Rb.maxAngularVelocity = t.maxSpin;
-            s.Rb.maxDepenetrationVelocity = t.separate;
-            s.Rb.solverIterations = t.solverIters;
-            s.Rb.solverVelocityIterations = Mathf.Max(1, t.solverIters / 3);
-            if (s.Kind != MmdBodyKind.BoneFollow)            // 按「是不是布料」判，别按 isKinematic —— 被距离剔除冻住的布料也是 kinematic
-            {
-                s.Rb.mass = MassOf(_m.bodies[s.Body]);
-                s.Rb.drag = s.BaseDrag * t.damping * DragScale(s.Body);
-                s.Rb.angularDrag = s.BaseAngDrag * t.damping * DragScale(s.Body);
-            }
+            ApplyBody(s);
             Collider col = s.Rb.GetComponent<Collider>();
             if (col != null)
-                Layers(s.Rb.gameObject, col, _m.bodies[s.Body]);
+                MmdLayers.Apply(s.Rb.gameObject, col, _m.bodies[s.Body], t.clothNoSelf);
         }
         foreach (KeyValuePair<int, ConfigurableJoint> kv in _joints)
         {
             ConfigurableJoint j = kv.Value;
             if (j == null)
                 continue;
-            bool chestWeld = _weldedChest.Contains(kv.Key);
-            if (chestWeld || _welded.Contains(kv.Key))
+            if (_welded.Contains(kv.Key))
             {
-                Release(j, chestWeld ? t.chestAngle : t.freeAngle, chestWeld);
+                Release(j, t.freeAngle);
                 continue;                                    // 下面那段 Damped() 会把回弹刚度冲掉，焊死关节不走它
             }
             j.projectionMode = t.projection ? JointProjectionMode.PositionAndRotation : JointProjectionMode.None;
-            if (_sprungChest.TryGetValue(kv.Key, out ChestBase c))
-            {
-                ApplySprungChest(j, c);                      // 胸部（蕾娜）：限位、弹簧、阻尼都按调参台的倍数重算
-                continue;
-            }
             // 弹簧刚度是 PMX 原值、不该动，这里只换 damper —— 读回来改一个字段就行，不用重算。
             j.angularXDrive = Damped(j.angularXDrive, t.springDamper);
             j.angularYZDrive = Damped(j.angularYZDrive, t.springDamper);
@@ -1057,8 +780,8 @@ internal class MmdRig
         }
     }
 
-    /// 放开的锁死关节：限位 ±angle、回弹按质量配（头发跟「锁死关节放开角度 / 回弹」，胸部跟「胸部摆动角度 / 回弹」，37.30）
-    private void Release(ConfigurableJoint j, float angle, bool chest)
+    /// 放开的锁死关节：限位 ±angle、回弹按质量配（跟「锁死关节放开角度 / 回弹」）
+    private void Release(ConfigurableJoint j, float angle)
     {
         float a = Mathf.Max(0.01f, angle);
         j.angularXMotion = j.angularYMotion = j.angularZMotion = ConfigurableJointMotion.Limited;
@@ -1068,7 +791,7 @@ internal class MmdRig
         j.angularZLimit = new SoftJointLimit { limit = a };
         Rigidbody rb = j.GetComponent<Rigidbody>();
         if (rb != null)
-            WeldSpring(j, rb.mass, chest);
+            WeldSpring(j, rb.mass);
     }
 
     /// 只换 damper、不动 PMX 原值的刚度。全关节无差别上阻尼 —— 和 <see cref="SetSprings"/> 一字一样，
@@ -1079,6 +802,7 @@ internal class MmdRig
         positionDamper = damper,
         maximumForce = d.maximumForce,
     };
+#endif
 
     /// 刚体质量 = PMX 值 × 调参台「质量倍率」，夹进 [0.001, MassCap]（离谱的在 MmdModel.Index 里已转成骨骼追随）。
     private float MassOf(MmdBody body) =>
@@ -1168,23 +892,23 @@ internal class MmdRig
             return;
         _complaints++;
         string name = _m.BoneName(_m.bodies[s.Body].bone) ?? "?";
-        string how = dist < 0f ? "算出了 NaN/无穷" : $"离父骨 {dist:F1} m";
-        Plugin.Log.LogError($"[mmd] 骨 {name}（刚体 {_m.bodies[s.Body].name}）{how}，已拦下不写回。"
-                            + $" 目标 {want}，父骨 {s.Bone.parent.name} @ {s.Bone.parent.position}"
-                            + (_complaints == 10 ? "（后续同类不再刷屏）" : ""));
+        string how = dist < 0f ? "became NaN/Infinity" : $"is {dist:F1} m from its parent";
+        Transform par = s.Bone.parent;
+        Plugin.Log.LogError($"[mmd] Bone {name} (rigid body {_m.bodies[s.Body].name}) {how}; not written back."
+                            + $" Target {want}, parent {(par != null ? par.name : "none")} @ {(par != null ? par.position : Vector3.zero)}"
+                            + (_complaints == 10 ? " (further ones are not logged)" : ""));
     }
 
     /// 角色瞬移（换地图 / 复活 / 传送）时整套复位，否则布料会被"拽"出一条几百米的甩尾。
-    internal bool CheckTeleport()
+    internal void CheckTeleport()
     {
         if (_ref == null)
-            return false;
+            return;
         Vector3 p = _ref.position;
         bool jumped = _awake && (p - _lastRef).sqrMagnitude > 4f;
         _lastRef = p;
         if (jumped)
             Reset();
-        return jumped;
     }
 
     internal void Reset()
@@ -1194,9 +918,7 @@ internal class MmdRig
         _awake = true;
         _trackInit = false;         // ⚠️ 不清的话，瞬移后 Track() 会把那一大步当成本帧位移
         if (_ref != null)
-        {
             _framePos = _ref.position;      // 参考系直接对齐，复位后不留任何残余相对运动
-        }
         for (int i = 0; i < _order.Count; i++)
         {
             Seg s = _order[i];
@@ -1264,14 +986,8 @@ internal class MmdRig
     private void Freeze(bool frozen)
     {
         foreach (Seg s in _segs.Values)
-        {
-            if (s.Rb == null || s.Kind == MmdBodyKind.BoneFollow)
-                continue;                                    // 骨骼追随体（含 Anchor 兜底转过来的）本来就是 kinematic
-            s.Rb.isKinematic = frozen;
-            s.Rb.collisionDetectionMode = frozen
-                ? CollisionDetectionMode.Discrete
-                : CollisionDetectionMode.ContinuousSpeculative;
-        }
+            if (s.Rb != null && s.Kind != MmdBodyKind.BoneFollow)
+                SetKinematic(s.Rb, frozen);                  // 骨骼追随体（含 Anchor 兜底转过来的）本来就是 kinematic
     }
 
     // ── 拆 ────────────────────────────────────────────────────────────────

@@ -6,7 +6,6 @@ using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Extensions;
 using SPTarkov.Server.Core.Helpers.Items;
-using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Tables;
@@ -24,14 +23,16 @@ namespace AstralDivide;
 public class RandomShelf(TradersTable traders, ItemHelper itemHelper, RandomUtil random, ICloner cloner) : IOnUpdate
 {
     const int ShelfSize = 6;
-    static readonly MongoId SoraId = new("90726f6a656374536f726132");
     int lastResupply = -1;
 
     public Task<bool> OnUpdateAsync(long _, CancellationToken __)
     {
-        if (!traders.TryGetValue(SoraId, out var sora) || !traders.TryGetValue(Traders.FENCE, out var fence)) return Task.FromResult(false);
-        if (sora.Base.NextResupply == lastResupply) return Task.FromResult(true);
-        lastResupply = sora.Base.NextResupply ?? 0;
+        if (SoraTrader.Id is not { } soraId || !traders.TryGetValue(soraId, out var sora) || !traders.TryGetValue(Traders.FENCE, out var fence))
+            return Task.FromResult(false);
+        // 空值按 0 算：比较和记录用同一个数（以前比较时拿空值比，空值永远「不相等」，每次都会重抽）
+        var next = sora.Base.NextResupply ?? 0;
+        if (next == lastResupply) return Task.FromResult(true);
+        lastResupply = next;
         var assort = sora.Assort;
         var oldRoots = assort.LoyalLevelItems.Where(kv => kv.Value == 1).Select(kv => kv.Key).ToList();
         var doomed = oldRoots.SelectMany(r => assort.Items.GetItemWithChildren(r)).ToHashSet();

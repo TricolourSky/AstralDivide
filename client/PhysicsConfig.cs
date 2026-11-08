@@ -30,7 +30,7 @@ public class PhysicsConfig
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"物理配置解析失败 {file}: {e.Message}");
+            Plugin.Log.LogError($"Failed to read chain config {file}: {e.Message}");
             return null;
         }
     }
@@ -41,14 +41,14 @@ public class PhysicsConfig
             cfg.chains = new List<ChainConfig>();
         int dropped = cfg.chains.RemoveAll(c => c == null || string.IsNullOrEmpty(c.attachTo));
         if (dropped > 0)
-            Plugin.Log.LogWarning($"剔除 {dropped} 条 attachTo 为空的链: {file}");
+            Plugin.Log.LogWarning($"Dropped {dropped} chains with an empty attachTo: {file}");
         foreach (ChainConfig chain in cfg.chains)
         {
             if (chain.bones == null)
                 chain.bones = new List<string>();
             int bad = chain.bones.RemoveAll(string.IsNullOrEmpty);
             if (bad > 0)
-                Plugin.Log.LogWarning($"剔除 {bad} 个空骨名 (链 {chain.attachTo}): {file}");
+                Plugin.Log.LogWarning($"Dropped {bad} empty bone names (chain {chain.attachTo}): {file}");
         }
     }
 }

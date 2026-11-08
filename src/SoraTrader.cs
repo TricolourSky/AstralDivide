@@ -1,9 +1,9 @@
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
-using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
+using SPTarkov.Server.Core.Models.Common;
 
 namespace AstralDivide;
 
@@ -17,20 +17,22 @@ namespace AstralDivide;
 /// </summary>
 [Injectable(typePriority: OnLoadOrder.TraderRegistration)]
 public class SoraTrader(
-    ISptLogger<SoraTrader> log,
     TraderRegistrar registrar,
     TraderDialogue dialogue,
     TraderLocales localeText,
     TraderRules rules,
     ContentLoader content) : IOnLoad
 {
+    /// SORA 的商人 id = db\base.json 的 _id，注册之后才有（RandomShelf 等拿它找人，不各自写死一份）
+    internal static MongoId? Id { get; private set; }
+
     public async Task OnLoadAsync(CancellationToken cancellationToken)
     {
         var assembly = Assembly.GetExecutingAssembly();
         var trader = registrar.Register(assembly, dialogue.Load(assembly));
+        Id = trader.Id;
         localeText.Apply(trader);
         rules.Apply(trader);
         await content.LoadAsync(assembly, trader);
-        log.Debug("[AstralDivide] SORA 已上线");
     }
 }

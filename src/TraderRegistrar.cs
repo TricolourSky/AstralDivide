@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
@@ -37,14 +36,6 @@ public class TraderRegistrar(
         };
 
         RegisterAvatar(traderBase, root);
-        log.Debug($"[AstralDivide] 商人 SORA 已注册 ({traderBase.Id}) — "
-            + $"{traderBase.LoyaltyLevels?.Count ?? 0} 档忠诚, 收购 {traderBase.ItemsBuy?.Category.Count ?? 0} 类, "
-            + $"修理={traderBase.Repair?.Availability}, 保险={traderBase.Insurance?.Availability}, PVE={traderBase.IsAvailableInPVE}, "
-            + $"邮件文案 {dialogue.Count} 类, "
-            // 前三个数必须相等：在架商品 / 售价 / 解锁等级。少一个都会变成"看得见买不了"。
-            // 子件 = 容器里的东西（弹药盒里的子弹），漏了的话买到手是空盒
-            + $"货架 {RootCount(assort)} 件·{assort.BarterScheme?.Count ?? 0} 价·{assort.LoyalLevelItems?.Count ?? 0} 级"
-            + $" + {(assort.Items?.Count ?? 0) - RootCount(assort)} 子件");
         return traderBase;
     }
 
@@ -69,13 +60,9 @@ public class TraderRegistrar(
             missing.Add(key);
         }
         if (missing.Count > 0)
-            log.Warning($"[AstralDivide] base.json 的 items_sell 缺第 {string.Join("/", missing)} 档，已补空档 —— "
-                + "缺档会让高忠诚存档打开武器预设编辑器时崩成空白，请补进 base.json");
+            log.Warning($"[AstralDivide] base.json items_sell is missing loyalty level {string.Join("/", missing)}; added empty ones. "
+                + "Without them the weapon preset editor goes blank on high-loyalty profiles - add them to base.json");
     }
-
-    /// 货架上"一格商品"的数量。slotId=hideout 才是根，其余是装在容器里的子件。
-    static int RootCount(TraderAssort assort) =>
-        assort.Items?.Count(i => i.SlotId == "hideout") ?? 0;
 
     /// <summary>
     /// 头像路由键**不能带扩展名**：SPT 收到请求也会先把扩展名切掉再查表，

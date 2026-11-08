@@ -39,12 +39,26 @@ internal static class PhysWorld
     {
         if (_ready && _scene.IsValid())
             return;
+        if (_ready)
+            Lost();                         // 场景随地图卸载了、Tick 还没来得及发现（比如物理开关关着的时候）
         _scene = SceneManager.CreateScene("BDS_Cloth", new CreateSceneParameters(LocalPhysicsMode.Physics3D));
         _phys = _scene.GetPhysicsScene();
         _ready = _scene.IsValid() && _phys.IsValid();
-        Plugin.Log.LogInfo(_ready
-            ? $"[mmd] 独立物理场景已建立（{Plugin.StepHz.Value}Hz 定步、PMX 单位、和游戏世界互不可见）"
-            : "[mmd] 独立物理场景建立失败，本次不建布料物理");
+        if (!_ready)
+            Plugin.Log.LogWarning("[mmd] Could not create the cloth physics scene, no cloth physics this time");
+    }
+
+    /// <summary>
+    /// 布料场景随地图卸载了（游戏加载地图会把所有场景一起销毁）：刚体、关节全没了，旧 rig 全部作废。
+    /// ⚠️ 以前只清了这里的名单，RigRegistry 里的旧 rig 还留着 —— 同一个人之后再换装会拿到那个刚体全没了的旧 rig，
+    /// 布料没人推、也建不起来（2026-10-17 审查 R11，2026-11-09 改）。现在一起清掉，下次换装重建。
+    /// </summary>
+    private static void Lost()
+    {
+        _ready = false;
+        _rigs.Clear();
+        _acc = 0f;
+        RigRegistry.ForgetAll();
     }
 
     /// 把一个 GameObject 挪进布料场景。不挪的话它待在游戏世界里，会撞墙。
@@ -76,10 +90,7 @@ internal static class PhysWorld
 
     internal static void FreeSlot(int slot) => _slots.Remove(slot);
 
-
-
-    /// 由 Plugin 在 **LateUpdate** 里调（必须在动画摆完姿势之后，否则读到的是上一帧的骨）。
-
+#if SORA_DEV
     /// 调参台改了某套模型的参数 —— 把它推给场上**所有穿着这套衣服**的角色，别人不受影响。
     internal static void ApplyTuning(string model)
     {
@@ -97,22 +108,20 @@ internal static class PhysWorld
                 n = Mathf.Max(n, _rigs[i].SwayCount(kind));
         return n;
     }
+#endif
 
+    /// 由 Plugin 在 **LateUpdate** 里调（必须在动画摆完姿势之后，否则读到的是上一帧的骨）。
     internal static void Tick(float dt)
     {
         if (!_ready || _rigs.Count == 0)
             return;
         // ⚠️ 游戏加载地图会把所有场景（包括我们这个）一起销毁，句柄随之失效。
-        // 不每帧查一次就会拿着死句柄 Simulate，每帧抛一次异常刷爆日志。
+        // 不每帧查一次就会拿着死句柄 Simulate，每帧抛一次异常刷爆日志。换装 / 重进战局时自动重建
         if (!_scene.IsValid() || !_phys.IsValid())
         {
-            _ready = false;
-            _rigs.Clear();
-            _acc = 0f;
-            Plugin.Log.LogInfo("[mmd] 物理场景随地图卸载了，已复位；换装/重进战局会自动重建");
+            Lost();
             return;
         }
-
         _rigs.RemoveAll(r => r == null || !r.Alive);
         Cull();
         bool anyAwake = false;
@@ -128,7 +137,15 @@ internal static class PhysWorld
             _acc = 0f;
             return;
         }
+        Simulate(dt);
+        // 衣服新做法（37.31）每帧算一次（内部按每步 ≤ 1/60 秒拆，最多 4 步），不跟 PhysX 的 120Hz 步数走
+        for (int i = 0; i < _rigs.Count; i++)
+            _rigs[i].SwayTick(dt);
+    }
 
+    /// PhysX 定步：攒够一步推一步（掉帧时最多补 MaxStepsPerFrame 步），推完写回骨，再按攒下的零头插值
+    private static void Simulate(float dt)
+    {
         float step = Step;
         int cap = MaxStepsPerFrame;
         _acc += Mathf.Min(dt, step * cap);
@@ -148,9 +165,6 @@ internal static class PhysWorld
         float alpha = Mathf.Clamp01(_acc / step);
         for (int i = 0; i < _rigs.Count; i++)
             _rigs[i].Interp(alpha);
-        // 衣服新做法（37.31）每帧算一次（内部按每步 ≤ 1/60 秒拆，最多 4 步），不跟 PhysX 的 120Hz 步数走
-        for (int i = 0; i < _rigs.Count; i++)
-            _rigs[i].SwayTick(dt);
     }
 
     /// <summary>
@@ -171,14 +185,5 @@ internal static class PhysWorld
                       (r.position - cam.transform.position).sqrMagnitude < far * far;
             _rigs[i].SetAwake(on);
         }
-    }
-
-    internal static void Shutdown()
-    {
-        _rigs.Clear();
-        if (_ready && _scene.IsValid())
-            SceneManager.UnloadSceneAsync(_scene);
-        _ready = false;
-        _acc = 0f;
     }
 }

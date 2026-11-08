@@ -1,4 +1,3 @@
-using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
@@ -12,7 +11,6 @@ namespace AstralDivide;
 /// </summary>
 [Injectable]
 public class TraderRules(
-    ISptLogger<TraderRules> log,
     TraderConfig traderConfig,
     InsuranceConfig insuranceConfig,
     TimeUtil time)
@@ -23,7 +21,6 @@ public class TraderRules(
     {
         SetRefreshInterval(trader.Id);
         SetInsuranceReturnChance(trader.Id);
-        log.Debug($"[AstralDivide] 商人规则已登记（货架 1~2 小时刷新，保险归还 {ReturnChancePercent}%）");
     }
 
     /// <summary>

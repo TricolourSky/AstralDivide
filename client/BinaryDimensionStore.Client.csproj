@@ -5,7 +5,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>AstralDivide.Client</AssemblyName>
     <RootNamespace>AstralDivide.Client</RootNamespace>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <!-- 本机 SPT 安装目录; 外部构建用 dotnet build -p:EftDir=<路径> 覆写 -->
     <EftDir Condition="'$(EftDir)' == ''">D:\SPT</EftDir>
     <Managed>$(EftDir)\EscapeFromTarkov_Data\Managed</Managed>
@@ -14,6 +14,11 @@
     <SoraDev Condition="'$(SoraDev)' == ''">true</SoraDev>
     <DefineConstants Condition="'$(SoraDev)' == 'true'">$(DefineConstants);SORA_DEV</DefineConstants>
   </PropertyGroup>
+
+  <!-- Unreleased\：还没发布的内容，只进开发版。发布版不编；也不进公开仓库（.gitignore） -->
+  <ItemGroup Condition="'$(SoraDev)' == 'false'">
+    <Compile Remove="Unreleased/**" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="BepInEx" HintPath="$(EftDir)\BepInEx\core\BepInEx.dll" Private="false" />

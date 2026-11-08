@@ -35,16 +35,6 @@ internal class MmdTuning
     public float freeAngle = 45f;         // 六自由度全锁死的链关节放开成 ±这个角度（度）；0 = 照 PMX 焊死
     public float weldSpring = 10f;        // 放开的锁死关节回到静止姿态的角弹簧刚度（每单位质量）；0 = 不回弹，纯靠重力
 
-    // 胸部（DEV_NOTES 37.30，只管 MmdModel.ChestJoints，和头发分开）。
-    // 六轴全锁的胸部（少前 2 解包的六套）：摆动角度 / 回弹 / 阻尼比，意思同上面三个；-1 = 文件里没有，读进来时照上面三个填（= 以前的样子）
-    public float chestAngle = -1f;
-    public float chestSpring = -1f;
-    public float chestDamper = -1f;
-    // 原模型带弹簧的胸部（蕾娜）：原模型的限位 / 弹簧 / 阻尼乘这几个倍数，1 = 原模型
-    public float chestRange = 1f;
-    public float chestSpringScale = 1f;
-    public float chestDampScale = 1f;
-
     // 衣服的新做法（DEV_NOTES 37.31）：每个部位一组，on = 这部位不建 PhysX 刚体、改走 ClothSway。默认全关 = 照旧 PMX 物理。
     // 默认值照少前 2 动画里量的规律：裙子前片跟腿 0.9，外套衣摆根部只跟腿一点，饰品不跟腿；
     // 软硬 6Hz / 阻尼比 0.6 是离线自检比出来的（往下每节摆幅 ×1.3、晚 33~50 ms，和少前 2 的 ×1.5~1.9、30~50 ms 最接近；4Hz 时梢部跟着跑步共振）
@@ -81,22 +71,14 @@ internal class MmdTuning
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"[mmd] {model}.tuning.json 解析失败，改用默认值: {e.Message}");
+            Plugin.Log.LogError($"[mmd] Failed to read {model}.tuning.json, using defaults: {e.Message}");
             t = new MmdTuning();
         }
-        t.FillChest();
         t.Clamp();
         return t;
     }
 
-    /// 胸部三项文件里还没有（-1）：照头发那三项填，装上新版不拖就和以前一样
-    private void FillChest()
-    {
-        if (chestAngle < 0f) chestAngle = freeAngle;
-        if (chestSpring < 0f) chestSpring = weldSpring;
-        if (chestDamper < 0f) chestDamper = springDamper;
-    }
-
+#if SORA_DEV
     internal bool Save(string dir, string model)
     {
         try
@@ -111,8 +93,7 @@ internal class MmdTuning
         }
     }
 
-    /// 一行摘要，只列**和默认值不同**的项 —— 启动时打出来，一眼就能看出这套参数到底加载了没有。
-    /// 以前一个字都不打，重开之后只能靠手感猜「是不是又被重置了」。
+    /// 一行摘要，只列**和默认值不同**的项 —— 调参台存盘时打出来，一眼就能看出写进去的是什么（开发版）
     internal string Describe()
     {
         var d = new MmdTuning();
@@ -130,16 +111,13 @@ internal class MmdTuning
         if (!Mathf.Approximately(weldSpring, d.weldSpring)) parts.Add("锁死关节回弹 " + weldSpring);
         if (clothNoSelf != d.clothNoSelf) parts.Add("布料互不碰撞 " + clothNoSelf);
         if (projection != d.projection) parts.Add("关节防拉散 " + projection);
-        if (!Mathf.Approximately(chestAngle, freeAngle) || !Mathf.Approximately(chestSpring, weldSpring) || !Mathf.Approximately(chestDamper, springDamper))
-            parts.Add($"胸部 放开 {chestAngle}° 回弹 {chestSpring} 阻尼比 {chestDamper}");
-        if (!Mathf.Approximately(chestRange, 1f) || !Mathf.Approximately(chestSpringScale, 1f) || !Mathf.Approximately(chestDampScale, 1f))
-            parts.Add($"胸部（原模型弹簧）幅度 ×{chestRange} 回弹 ×{chestSpringScale} 阻尼 ×{chestDampScale}");
         if (skirt.on) parts.Add("裙子新做法（" + skirt.Describe() + "）");
         if (coat.on) parts.Add("外套衣摆新做法（" + coat.Describe() + "）");
         if (acc.on) parts.Add("饰品新做法（" + acc.Describe() + "）");
         if (chest.on) parts.Add("胸部新做法（" + chest.Describe() + "）");
         return parts.Count == 0 ? "全是默认值" : string.Join(" / ", parts.ToArray());
     }
+#endif
 
     /// 手写的 JSON 难免有超范围的值，夹一下 —— 尤其 solverIters=0 会让 PhysX 直接不解算。
     internal void Clamp()
@@ -155,12 +133,6 @@ internal class MmdTuning
         massScale = Mathf.Clamp(massScale, 0.01f, 100f);
         freeAngle = Mathf.Clamp(freeAngle, 0f, 120f);
         weldSpring = Mathf.Clamp(weldSpring, 0f, 200f);
-        chestAngle = Mathf.Clamp(chestAngle, 0f, 120f);
-        chestSpring = Mathf.Clamp(chestSpring, 0f, 200f);
-        chestDamper = Mathf.Clamp(chestDamper, 0f, 20f);
-        chestRange = Mathf.Clamp(chestRange, 0f, 2f);
-        chestSpringScale = Mathf.Clamp(chestSpringScale, 0f, 5f);
-        chestDampScale = Mathf.Clamp(chestDampScale, 0f, 5f);
         // 手写的 json 里写成 null 也别崩：回到默认（= 关）
         if (skirt == null) skirt = Skirt();
         if (coat == null) coat = Coat();

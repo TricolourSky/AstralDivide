@@ -24,15 +24,13 @@ internal static class InjectionRegistry
 
     internal static bool ContextActive;
     internal static Skeleton ContextSkeleton;
-    internal static EBodyModelPart ContextPart;
     internal static PhysicsConfig ContextConfig;
     internal static readonly List<string> PendingNames = new List<string>();
 
-    internal static void BeginContext(Skeleton skeleton, EBodyModelPart part, PhysicsConfig cfg)
+    internal static void BeginContext(Skeleton skeleton, PhysicsConfig cfg)
     {
         ContextActive = true;
         ContextSkeleton = skeleton;
-        ContextPart = part;
         ContextConfig = cfg;
         PendingNames.Clear();
     }
@@ -169,6 +167,29 @@ internal static class RigRegistry
         }
         _rigs.Remove(skeleton);
     }
+
+    /// 布料场景随地图卸载了（PhysWorld.Lost）：所有 rig 的刚体、关节都没了，整张表作废（车位号一起还），下次换装重建
+    internal static void ForgetAll()
+    {
+        foreach (Dictionary<string, MmdRig> byModel in _rigs.Values)
+            foreach (MmdRig rig in byModel.Values)
+                rig.DestroyAll();
+        _rigs.Clear();
+    }
+}
+
+/// <summary>
+/// 三个 SetSkin 补丁（布料 <see cref="AttachPatch"/>、眨眼 <see cref="BlinkPatch"/>、少前 2 渲染 GF2SkinPatch）共用：
+/// 这次换上的部位的包名（`basti_upper`，没有路径时是 null）和它的 LoddedSkin。三个补丁本身保持分开（10-10 定的）
+/// </summary>
+internal static class SkinPart
+{
+    internal static bool TryGet(PlayerBody body, KeyValuePair<EBodyModelPart, ResourceKey> part, out string key, out LoddedSkin lodded)
+    {
+        string path = part.Value?.path;
+        key = string.IsNullOrEmpty(path) ? null : Path.GetFileNameWithoutExtension(path);
+        return body.BodySkins.TryGetValue(part.Key, out lodded) && lodded != null;
+    }
 }
 
 [HarmonyPatch(typeof(PlayerBody), nameof(PlayerBody.SetSkin))]
@@ -186,84 +207,49 @@ internal static class AttachPatch
             string path = part.Value?.path;
             if (!string.IsNullOrEmpty(path))
                 Plugin.Configs.TryGetValue(Path.GetFileNameWithoutExtension(path), out cfg);
-            InjectionRegistry.BeginContext(skeleton, part.Key, cfg);
+            InjectionRegistry.BeginContext(skeleton, cfg);
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"SetSkin prefix 异常: {e}");
+            Plugin.Log.LogError($"SetSkin prefix error: {e}");
         }
     }
 
+    /// 三步走：先在静止姿态下**量**，再**嫁接**，最后**建物理**。
+    /// 顺序不能换 —— 一嫁接骨就跟着玩家的动画姿势跑了，再量就把那一瞬间的姿势烘死了。
     [HarmonyPostfix]
     private static void Postfix(PlayerBody __instance, KeyValuePair<EBodyModelPart, ResourceKey> part, Skeleton skeleton)
     {
         List<Transform> roots = null;
         try
         {
-            string path = part.Value?.path;
-            if (string.IsNullOrEmpty(path) || skeleton == null)
+            if (skeleton == null || !SkinPart.TryGet(__instance, part, out string key, out LoddedSkin lodded)
+                || key == null || !Plugin.Configs.TryGetValue(key, out PhysicsConfig cfg))
                 return;
-            string key = Path.GetFileNameWithoutExtension(path);
-            if (!Plugin.Configs.TryGetValue(key, out PhysicsConfig cfg))
-                return;
-            if (!__instance.BodySkins.TryGetValue(part.Key, out LoddedSkin lodded) || lodded == null)
-                return;
-            Dictionary<string, Transform> leafIndex = BonePath.LeafIndex(skeleton);
-            Dictionary<string, Transform> lookup = SkeletonPatch.BuildLookup(lodded.transform);
             MmdModel model = MmdRaw.For(key);
-            bool physics = model != null && Plugin.Enabled.Value && PlayerGate.Allow(__instance, key);
-
-            // 三步走：先在静止姿态下**量**，再**嫁接**，最后**建物理**。
-            // 顺序不能换 —— 一嫁接骨就跟着玩家的动画姿势跑了，再量就把那一瞬间的姿势烘死了。
+            if (model == null && Plugin.Enabled.Value)
+                LogOnce.Warn($"[mmd] {key}: {MmdRaw.ModelOf(key)}_raw.json not found, bones are grafted without physics");
+            bool physics = model != null && Plugin.Enabled.Value && PlayerGate.Allow(__instance);
+            var bones = new BoneMaps(skeleton, lodded);
             var survey = physics ? new MmdSurvey(model) : null;
-            var chains = new List<Grafted>();
             var used = new HashSet<string>();
-            foreach (ChainConfig chain in cfg.chains)
-            {
-                Grafted g = Measure(chain, leafIndex, lookup, used);
-                if (g == null)
-                    continue;
-                chains.Add(g);
-                survey?.AddChain(chain.attachTo, chain.bones, g.Bones);
-                foreach (string n in chain.bones)
-                    used.Add(n);
-            }
-
+            List<Grafted> chains = MeasureAll(cfg, bones, survey, used);
             if (physics)
                 foreach (MmdBoneMap bm in model.boneMap)
-                    if (leafIndex.TryGetValue(bm.eft, out Transform rt) && lookup.TryGetValue(bm.eft, out Transform rest))
+                    if (bones.Leaf.TryGetValue(bm.eft, out Transform rt) && bones.Rest.TryGetValue(bm.eft, out Transform rest))
                         survey.AddEft(bm.eft, rt, rest);
-
             roots = new List<Transform>();
             foreach (Grafted g in chains)
             {
                 g.Apply();
                 roots.Add(g.Root);
             }
-
-            if (!physics || chains.Count == 0)
-            {
-                if (model == null && Plugin.Enabled.Value)
-                    Plugin.Log.LogWarning($"[mmd] {key}: 找不到 {key.Split('_')[0]}_raw.json，本部位只嫁接骨、不建物理");
-                return;
-            }
-
-            PhysWorld.Ensure();
-            if (!PhysWorld.Ready || !survey.Solve(key))
-                return;
-            leafIndex.TryGetValue("Base HumanPelvis", out Transform reference);
-            MmdRig rig = RigRegistry.Get(skeleton, model);
-            List<ClothSway.Input> sway = SwayInputs(model, chains, (int)part.Key);
-            ClothSway.Body legs = sway.Count > 0 ? SwayBody(leafIndex, lookup) : null;
-            rig.AddPart((int)part.Key, survey, used, reference ?? chains[0].Attach, key, sway, legs);
-#if SORA_DEV
-            if (PlayerGate.IsLocal(__instance))
-                TuneUI.Follow(model.Name);          // 调参台跟着你身上穿的这套走（开发版才有调参台，37.29）
-#endif
+            if (physics && chains.Count > 0)
+                BuildPhysics(__instance, skeleton, (int)part.Key, key, model, survey, chains, used, bones);
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"AttachPatch 异常: {e}");
+            Plugin.Log.LogError($"AttachPatch error: {e}");
         }
         finally
         {
@@ -271,59 +257,109 @@ internal static class AttachPatch
         }
     }
 
-    /// 一条链的校验 + 静止姿态测量。校验不过返回 null（整条链不挂，和以前一样）。
-    private static Grafted Measure(ChainConfig chain, Dictionary<string, Transform> leafIndex,
-                                   Dictionary<string, Transform> lookup, HashSet<string> used)
+    /// 第三步：布料场景、拟合、这个角色这套模型的 rig，交给新做法的链和腿带动一起交过去
+    private static void BuildPhysics(PlayerBody body, Skeleton skeleton, int owner, string key, MmdModel model, MmdSurvey survey,
+                                     List<Grafted> chains, HashSet<string> used, BoneMaps bones)
     {
-        if (chain.bones == null || chain.bones.Count < 1)
+        PhysWorld.Ensure();
+        if (!PhysWorld.Ready || !survey.Solve(key))
+            return;
+        bones.Leaf.TryGetValue("Base HumanPelvis", out Transform pelvis);
+        MmdRig rig = RigRegistry.Get(skeleton, model);
+        List<ClothSway.Input> sway = SwayInputs(model, chains, owner);
+        ClothSway.Body legs = sway.Count > 0 ? SwayBody(pelvis, bones) : null;
+        rig.AddPart(owner, survey, used, pelvis ?? chains[0].Attach, key, sway, legs);
+#if SORA_DEV
+        if (PlayerGate.IsLocal(body))
+            TuneUI.Follow(model.Name);          // 调参台跟着你身上穿的这套走（开发版才有调参台，37.29）
+#endif
+    }
+
+    /// 玩家骨架（按骨名末段索引）和服装 prefab 自带的静止骨架（按名字索引）
+    private sealed class BoneMaps
+    {
+        internal readonly Dictionary<string, Transform> Leaf, Rest;
+
+        internal BoneMaps(Skeleton skeleton, LoddedSkin lodded)
         {
-            Plugin.Log.LogWarning($"链没有骨, 跳过: attachTo={chain.attachTo}");
+            Leaf = BonePath.LeafIndex(skeleton);
+            Rest = SkeletonPatch.BuildLookup(lodded.transform);
+        }
+    }
+
+    /// 第一步：每条链校验 + 量静止姿态（校验不过的整条不挂）；量好的交给拟合，骨名记进 used
+    private static List<Grafted> MeasureAll(PhysicsConfig cfg, BoneMaps bones, MmdSurvey survey, HashSet<string> used)
+    {
+        var chains = new List<Grafted>();
+        foreach (ChainConfig chain in cfg.chains)
+        {
+            Grafted g = Measure(chain, bones, used);
+            if (g == null)
+                continue;
+            chains.Add(g);
+            survey?.AddChain(chain.attachTo, chain.bones, g.Bones);
+            foreach (string n in chain.bones)
+                used.Add(n);
+        }
+        return chains;
+    }
+
+    /// 一条链的校验 + 静止姿态测量。校验不过返回 null（整条链不挂，和以前一样）。
+    private static Grafted Measure(ChainConfig chain, BoneMaps bones, HashSet<string> used)
+    {
+        Transform[] chainBones = ChainBones(chain, bones, used, out Transform attach);
+        if (chainBones == null)
             return null;
-        }
-        foreach (string name in chain.bones)
-            if (used.Contains(name))
-            {
-                Plugin.Log.LogError($"骨名 {name} 已被其他链占用, 整条链拒挂: attachTo={chain.attachTo}");
-                return null;
-            }
-        if (!leafIndex.TryGetValue(chain.attachTo, out Transform attach) || attach == null)
+        if (!bones.Rest.TryGetValue(chain.attachTo, out Transform attachNode) || attachNode == null)
         {
-            Plugin.Log.LogWarning($"attachTo 骨不存在, 整条链跳过: {chain.attachTo}");
-            return null;
-        }
-        var bones = new Transform[chain.bones.Count];
-        for (int i = 0; i < bones.Length; i++)
-        {
-            if (!leafIndex.TryGetValue(chain.bones[i], out bones[i]) || bones[i] == null)
-                lookup.TryGetValue(chain.bones[i], out bones[i]);
-            if (bones[i] == null)
-            {
-                Plugin.Log.LogWarning($"链骨不存在, 整条链跳过: {chain.bones[i]}");
-                return null;
-            }
-        }
-        for (int i = 0; i < bones.Length - 1; i++)
-            if (bones[i + 1].parent != bones[i])
-            {
-                Plugin.Log.LogError($"链骨 {chain.bones[i + 1]} 不是 {chain.bones[i]} 的直接子级, 整条链拒挂");
-                return null;
-            }
-        if (!lookup.TryGetValue(chain.attachTo, out Transform attachNode) || attachNode == null)
-        {
-            Plugin.Log.LogWarning($"服装 prefab 里找不到 attachTo 同名节点, 整条链跳过: {chain.attachTo}");
+            LogOnce.Warn($"[mmd] No node named {chain.attachTo} in the outfit prefab, chain skipped");
             return null;
         }
         return new Grafted
         {
-            Bones = bones,
+            Bones = chainBones,
             Names = chain.bones.ToArray(),
-            Root = bones[0],
+            Root = chainBones[0],
             Attach = attach,
-            RestRoot = bones[0].position,                    // 还没嫁接：骨在服装 prefab 的静止骨架里（新做法定方位用，37.31）
+            RestRoot = chainBones[0].position,               // 还没嫁接：骨在服装 prefab 的静止骨架里（新做法定方位用，37.31）
             // 用 prefab 自带的同名骨算绑定姿态的局部位姿；直接保世界变换会把动画姿势烘进去。
-            LocalPos = attachNode.InverseTransformPoint(bones[0].position),
-            LocalRot = Quaternion.Inverse(attachNode.rotation) * bones[0].rotation,
+            LocalPos = attachNode.InverseTransformPoint(chainBones[0].position),
+            LocalRot = Quaternion.Inverse(attachNode.rotation) * chainBones[0].rotation,
         };
+    }
+
+    /// 链上的骨（从根到梢）和挂点。没骨 / 骨名被别的链占了 / 挂点不存在 / 骨找不到 / 不是一条直系链 → null（报一次原因）
+    private static Transform[] ChainBones(ChainConfig chain, BoneMaps bones, HashSet<string> used, out Transform attach)
+    {
+        attach = null;
+        if (chain.bones == null || chain.bones.Count < 1)
+            return Skip($"[mmd] Chain without bones skipped: attachTo={chain.attachTo}", false);
+        foreach (string name in chain.bones)
+            if (used.Contains(name))
+                return Skip($"[mmd] Bone {name} already belongs to another chain, chain on {chain.attachTo} rejected", true);
+        if (!bones.Leaf.TryGetValue(chain.attachTo, out attach) || attach == null)
+            return Skip($"[mmd] attachTo bone {chain.attachTo} not found, chain skipped", false);
+        var result = new Transform[chain.bones.Count];
+        for (int i = 0; i < result.Length; i++)
+        {
+            if (!bones.Leaf.TryGetValue(chain.bones[i], out result[i]) || result[i] == null)
+                bones.Rest.TryGetValue(chain.bones[i], out result[i]);
+            if (result[i] == null)
+                return Skip($"[mmd] Chain bone {chain.bones[i]} not found, chain skipped", false);
+        }
+        for (int i = 0; i < result.Length - 1; i++)
+            if (result[i + 1].parent != result[i])
+                return Skip($"[mmd] Chain bone {chain.bones[i + 1]} is not a direct child of {chain.bones[i]}, chain rejected", true);
+        return result;
+    }
+
+    private static Transform[] Skip(string message, bool error)
+    {
+        if (error)
+            LogOnce.Error(message);
+        else
+            LogOnce.Warn(message);
+        return null;
     }
 
     /// <summary>
@@ -353,19 +389,15 @@ internal static class AttachPatch
     /// 腿带裙要用的身体：运行时的胯 / 两条大腿，和服装 prefab 静止骨架上量的框架（大腿相对胯的静止朝向、身体的右 / 前 / 上）。
     /// 上 = 脚 → 胯；右 = 左大腿 → 右大腿；前 = 右 × 上，再用脚尖校正正负。缺骨就只给能给的（大腿缺了 = 不跟腿，只跟挂点）。
     /// </summary>
-    private static ClothSway.Body SwayBody(Dictionary<string, Transform> leafIndex, Dictionary<string, Transform> lookup)
+    private static ClothSway.Body SwayBody(Transform pelvis, BoneMaps bones)
     {
-        var b = new ClothSway.Body();
-        leafIndex.TryGetValue("Base HumanPelvis", out b.Pelvis);
-        leafIndex.TryGetValue("Base HumanLThigh1", out b.ThighL);
-        leafIndex.TryGetValue("Base HumanRThigh1", out b.ThighR);
-        // 转身用的「角色根」：从胯往上第一个不叫 Base Human… 的节点 = 整副骨架的容器，跟着角色转身、不带走路时胯的扭动
-        Transform t = b.Pelvis;
-        while (t != null && t.parent != null && t.parent.name.StartsWith("Base Human", StringComparison.Ordinal))
-            t = t.parent;
-        b.Root = t != null ? t.parent ?? t : null;
-        if (!lookup.TryGetValue("Base HumanPelvis", out Transform p) || !lookup.TryGetValue("Base HumanLThigh1", out Transform l)
-            || !lookup.TryGetValue("Base HumanRThigh1", out Transform r) || p == null || l == null || r == null)
+        var b = new ClothSway.Body { Pelvis = pelvis };
+        bones.Leaf.TryGetValue("Base HumanLThigh1", out b.ThighL);
+        bones.Leaf.TryGetValue("Base HumanRThigh1", out b.ThighR);
+        b.Root = CharacterRoot(pelvis);
+        Dictionary<string, Transform> rest = bones.Rest;
+        if (!rest.TryGetValue("Base HumanPelvis", out Transform p) || !rest.TryGetValue("Base HumanLThigh1", out Transform l)
+            || !rest.TryGetValue("Base HumanRThigh1", out Transform r) || p == null || l == null || r == null)
         {
             b.ThighL = b.ThighR = null;
             return b;
@@ -373,15 +405,24 @@ internal static class AttachPatch
         b.RestL = Quaternion.Inverse(p.rotation) * l.rotation;
         b.RestR = Quaternion.Inverse(p.rotation) * r.rotation;
         b.Center = (l.position + r.position) * 0.5f;
-        if (lookup.TryGetValue("Base HumanLFoot", out Transform fl) && lookup.TryGetValue("Base HumanRFoot", out Transform fr) && fl != null && fr != null)
+        if (rest.TryGetValue("Base HumanLFoot", out Transform fl) && rest.TryGetValue("Base HumanRFoot", out Transform fr) && fl != null && fr != null)
             b.Up = (p.position - (fl.position + fr.position) * 0.5f).normalized;
         b.Right = Vector3.ProjectOnPlane(r.position - l.position, b.Up).normalized;
         b.HalfWidth = Mathf.Abs(Vector3.Dot(r.position - l.position, b.Right)) * 0.5f;
         b.Forward = Vector3.Cross(b.Right, b.Up);
-        if (lookup.TryGetValue("Base HumanLFoot", out Transform foot) && lookup.TryGetValue("Base HumanLToe", out Transform toe)
+        if (rest.TryGetValue("Base HumanLFoot", out Transform foot) && rest.TryGetValue("Base HumanLToe", out Transform toe)
             && foot != null && toe != null && Vector3.Dot(toe.position - foot.position, b.Forward) < 0f)
             b.Forward = -b.Forward;
         return b;
+    }
+
+    /// 转身用的「角色根」：从胯往上第一个不叫 Base Human… 的节点 = 整副骨架的容器，跟着角色转身、不带走路时胯的扭动
+    private static Transform CharacterRoot(Transform pelvis)
+    {
+        Transform t = pelvis;
+        while (t != null && t.parent != null && t.parent.name.StartsWith("Base Human", StringComparison.Ordinal))
+            t = t.parent;
+        return t != null ? t.parent ?? t : null;
     }
 
     private class Grafted
@@ -408,35 +449,22 @@ internal static class AttachPatch
 /// （F12「联机时只算自己」开着时不给队友，37.29）。
 /// 无头/专用服务端整个关掉（那儿没人看，白烧 CPU）。
 /// </summary>
-internal static class PlayerGate
+internal static partial class PlayerGate
 {
     /// <see cref="IconBodyMarkPatch"/> 在 PlayerIconCreatorModelView.CreateBody() 那一刻登记的身体 ——
     /// 头部选择卡片的离屏渲染专用，天生不该有物理。Dispose 时由 <see cref="DisposePatch"/> 摘除。
     internal static readonly HashSet<PlayerBody> IconBodies = new HashSet<PlayerBody>();
 
-    internal static bool Allow(PlayerBody body, string key)
+    internal static bool Allow(PlayerBody body)
     {
-        if (Plugin.HeadlessDetected)
+        if (Plugin.HeadlessDetected || IconBodies.Contains(body))
             return false;
-        if (IconBodies.Contains(body))
-        {
-            Plugin.Log.LogDebug($"[mmd] {key}: PlayerIconCreator 的图标身体，不建物理");
-            return false;
-        }
         Player player = body.GetComponentInParent<Player>();
         if (player != null)
         {
-            if (player.IsAI)
-            {
-                Plugin.Log.LogDebug($"[mmd] {key}: 穿在 bot 身上，不建物理");
+            if (IsBot(player))
                 return false;
-            }
-            if (Plugin.OnlySelf.Value && !player.IsYourPlayer)
-            {
-                Plugin.Log.LogDebug($"[mmd] {key}: 穿在队友身上、F12 选了「联机时只算自己」，不建物理");
-                return false;
-            }
-            return true;                    // 本地玩家 + FIKA 里的真人队友
+            return !Plugin.OnlySelf.Value || player.IsYourPlayer;     // 本地玩家 + FIKA 里的真人队友（「联机时只算自己」开着时只有自己）
         }
         // 没有 Player 的 PlayerBody = 主菜单 / 藏身处 / 服装页的预览人物，要物理，那是给你看的。
         // 唯一不该有物理的离屏身体（头部卡片）已在出生时被 IconBodies 拦下，这里不用再猜挂法
@@ -444,6 +472,18 @@ internal static class PlayerGate
         return true;
     }
 
+    /// bot 不建物理（开发版里可以有例外，见 OverrideBot）
+    private static bool IsBot(Player player)
+    {
+        bool bot = player.IsAI;
+        OverrideBot(player, ref bot);
+        return bot;
+    }
+
+    /// 开发版的扩展点：实现在 client\Unreleased\（只进开发版）。没有实现时（发布版、公开仓库）编译器连这次调用一起拿掉
+    static partial void OverrideBot(Player player, ref bool bot);
+
+#if SORA_DEV
     /// 只有本地玩家和主菜单/藏身处的预览人物才算「你身上穿的」——
     /// FIKA 队友身上的衣服不许去抢调参台的下拉框。
     internal static bool IsLocal(PlayerBody body)
@@ -451,7 +491,7 @@ internal static class PlayerGate
         Player player = body.GetComponentInParent<Player>();
         return player == null || player.IsYourPlayer;
     }
-
+#endif
 }
 
 /// <summary>
@@ -474,7 +514,7 @@ internal static class IconBodyMarkPatch
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"IconBodyMarkPatch 异常: {e}");
+            Plugin.Log.LogError($"IconBodyMarkPatch error: {e}");
         }
     }
 }
@@ -493,7 +533,7 @@ internal static class DisposePatch
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"Dispose postfix 异常: {e}");
+            Plugin.Log.LogError($"Dispose postfix error: {e}");
         }
     }
 }

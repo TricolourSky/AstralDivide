@@ -35,15 +35,10 @@ public class TraderDialogue(LocaleTable locales, ModHelper mod)
         e.GetProperty("id").GetString()!,
         e.EnumerateObject().Where(p => p.Name != "id").ToDictionary(p => p.Name, p => p.Value.GetString() ?? string.Empty));
 
-    void ApplyLocales(List<Line> lines)
-    {
-        foreach (var (code, lazyLocale) in locales.Global)
-            lazyLocale.AddTransformer(data =>
-            {
-                if (data == null) return data;
-                foreach (var line in lines)
-                    data[line.Id] = line.Text.GetValueOrDefault(code) ?? line.Text.GetValueOrDefault("en") ?? line.Id;
-                return data;
-            });
-    }
+    void ApplyLocales(List<Line> lines) =>
+        LocaleHook.Each(locales, (code, data) =>
+        {
+            foreach (var line in lines)
+                data[line.Id] = line.Text.GetValueOrDefault(code) ?? line.Text.GetValueOrDefault("en") ?? line.Id;
+        });
 }

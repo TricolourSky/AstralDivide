@@ -4,17 +4,17 @@
 
 AstralDivide 的源代码。这是一个 [SPT](https://sp-tarkov.com/) 4.1.x 的模组。
 
-SORA，一位来自 Astral Divide 的狐耳商人，带着七套「像在 MMD 里那样会动」的二次元服装、一间自己的商店，还有一段讲她怎么来到塔科夫的剧情章节。
+SORA，一位来自 Astral Divide 的狐耳商人，带着十四套「像在 MMD 里那样会动」的二次元服装、一间自己的商店，还有一段讲她怎么来到塔科夫的剧情章节。
 
-> **0.2.0 是测试版。** 数值和细节还可能调整。
+> **0.3.0 是测试版。** 数值和细节还可能调整。
 
 ## 模组做了什么
 
 - **新商人 SORA。** 卖服装，有一个每次补货都会重抽的整枪货架，提供保险和修理，共四档忠诚等级。
-- **7 套服装和 7 个头部**，少女前线 2：追放的画风，每套都有上衣、下装和配套的第一人称手臂。
+- **14 套服装和 14 个头部**，少女前线 2：追放的画风，每套都有上衣、下装和配套的第一人称手臂。
 - **布料物理。** 头发、裙子、外套、飘带、尾巴，都按 MMD 原模型的物理数据实时计算：模型里有一个刚体就建一个刚体、有一条关节就建一条关节，跑在一个独立的物理场景里。
 - **剧情章节「初次接触」。** 16 个任务，靠战局里的碰面、藏身处里的无线电通话和带插画的对话来推进。需要 [VisitAPI](https://github.com/TricolourSky/VisitAPI)。
-- **中英双语。**
+- **中英双语。** 剧情章节另有俄文和日文。
 
 ## 仓库里有什么
 
@@ -59,6 +59,8 @@ dotnet build src\BinaryDimensionStore.csproj           -c Release -p:SptDir=<SPT
 ```
 
 编出来的 DLL 在 `client\bin\Release\net472\` 和 `src\bin\Release\net10.0\`。
+
+发布包里的 DLL 是在两条命令后面都加上 `-p:SoraDev=false` 编的，不带开发工具（包括 F12 调参台）。
 
 **`dotnet build` 编完会顺手安装。** 它会把 DLL、`LICENSE` 和 `NOTICE.txt` 拷进 `<SPT>\BepInEx\plugins\AstralDivide\`（客户端）和 `<SPT>\SPT_Runtime\user\mods\AstralDivide\`（服务端）。先关掉游戏和服务端，否则 DLL 被占用，拷贝会失败。
 

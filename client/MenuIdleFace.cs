@@ -86,17 +86,15 @@ internal sealed class MenuIdleFace
     };
 
     // 自然眨眼（Tech Leader：「加吧」）：疑惑停住中间一次、恢复时眼睛睁开后一次（微笑时眼睛本来就闭着，眨了看不见）。
-    // 曲线：闭眼 u² 加速合上、停一下、睁眼 (1-v)² 减速睁开 —— 比匀速开合自然。意识到那一下不眨（Tech Leader 定的）。
+    // 曲线 = FaceBlink.Curve（闭眼 u² 加速合上、停一下、睁眼 (1-v)² 减速睁开，和战局表情同一条）。意识到那一下不眨（Tech Leader 定的）。
     private static readonly float[] Blinks = { 1.95f, 8.15f };
-    private const float BlinkClose = 0.08f, BlinkHold = 0.04f, BlinkOpen = 0.16f;
 
     /// 正在播（要动头）的：Plugin.LateUpdate 每帧过一遍。
     private static readonly HashSet<MenuIdleFace> Playing = new HashSet<MenuIdleFace>();
     private static readonly List<MenuIdleFace> Finished = new List<MenuIdleFace>();
 
-    private readonly List<KeyValuePair<SkinnedMeshRenderer, int>>[] _targets;
+    private readonly FaceMorphs _morphs;
     private readonly FaceSpring[] _springs = new FaceSpring[Freq.Length];   // 弹簧在 FaceKit.cs，和战局表情共用
-    private readonly float[] _applied = new float[Shapes.Length];
     private float _t = -1f;          // 播到第几秒；-1 = 没在播
     private int _next;               // 下一个要触发的事件
     private bool _cancel;            // 被打断，正在收回
@@ -113,22 +111,7 @@ internal sealed class MenuIdleFace
     {
         for (int c = 0; c < _springs.Length; c++)
             _springs[c] = new FaceSpring(Freq[c], Damp[c]);
-        _targets = new List<KeyValuePair<SkinnedMeshRenderer, int>>[Shapes.Length];
-        for (int c = 0; c < Shapes.Length; c++)
-            _targets[c] = new List<KeyValuePair<SkinnedMeshRenderer, int>>();
-        foreach (SkinnedMeshRenderer smr in lodded.GetComponentsInChildren<SkinnedMeshRenderer>(true))
-        {
-            Mesh mesh = smr.sharedMesh;
-            for (int c = 0; mesh != null && c < Shapes.Length; c++)
-            {
-                int index = mesh.GetBlendShapeIndex(Shapes[c]);
-                if (index >= 0)
-                    _targets[c].Add(new KeyValuePair<SkinnedMeshRenderer, int>(smr, index));
-            }
-        }
-        for (int c = 0; c < Shapes.Length; c++)
-            if (_targets[c].Count == 0)
-                Plugin.Log.LogWarning($"[表情] {Model} 头部找不到「{Shapes[c]}」，挂机表情少这一路");
+        _morphs = new FaceMorphs(lodded, Shapes, Model + " idle face");
     }
 
     /// 每帧由 MmdBlink 调。在播返回「まばたき」该是多少（0~100，只有安排好的那两次眨眼不是 0；随机眨眼暂停）；没在播返回 -1，随机眨眼照常。
@@ -151,17 +134,8 @@ internal sealed class MenuIdleFace
     {
         float b = 0f;
         foreach (float s in Blinks)
-        {
-            float u = t - s;
-            if (s > notAfter || u < 0f)
-                continue;
-            if (u < BlinkClose)
-                b = Mathf.Max(b, (u / BlinkClose) * (u / BlinkClose));
-            else if (u < BlinkClose + BlinkHold)
-                b = 1f;
-            else if (u < BlinkClose + BlinkHold + BlinkOpen)
-                b = Mathf.Max(b, Mathf.Pow(1f - (u - BlinkClose - BlinkHold) / BlinkOpen, 2f));
-        }
+            if (s <= notAfter)
+                b = Mathf.Max(b, FaceBlink.Curve(t - s));
         return b;
     }
 
@@ -260,7 +234,7 @@ internal sealed class MenuIdleFace
         _t = -1f;
     }
 
-    /// 形态键：数值变了才写（颈 / 头 / 低头不在这，归 LateTick）。
+    /// 形态键：数值变了才写（FaceMorphs 管；颈 / 头 / 低头不在这，归 LateTick）。
     /// 眨眼时把眯眼（じと目）和笑眼（笑い）按比例让出来 —— 和「まばたき」叠满会眼皮穿插、闭过头。
     private void Apply()
     {
@@ -269,12 +243,7 @@ internal sealed class MenuIdleFace
             float w = Mathf.Clamp(_springs[c].Y, 0f, 100f);
             if (c == JiTo || c == Smile)
                 w *= 1f - _blink;
-            if (Mathf.Abs(w - _applied[c]) < 0.01f)
-                continue;
-            _applied[c] = w;
-            foreach (KeyValuePair<SkinnedMeshRenderer, int> t in _targets[c])
-                if (t.Key != null)
-                    t.Key.SetBlendShapeWeight(t.Value, w);
+            _morphs.Set(c, w);
         }
     }
 
@@ -338,13 +307,13 @@ internal sealed class HeadTilt
         Transform head = body != null && body.PlayerBones != null && body.PlayerBones.Head != null ? body.PlayerBones.Head.Original : null;
         if (head == null)
         {
-            Plugin.Log.LogWarning("[表情] 找不到头骨（PlayerBones.Head），挂机表情不动头");
+            LogOnce.Warn("[face] Head bone (PlayerBones.Head) not found, the idle face will not move the head");
             return null;
         }
         Transform neck = head.parent;
         if (neck != null && neck.name == "Base HumanNeck")
             return new HeadTilt(body.transform, neck, head);
-        Plugin.Log.LogWarning($"[表情] 头骨的父骨头是「{neck?.name}」不是 Base HumanNeck，只转头");
+        LogOnce.Warn($"[face] Parent of the head bone is \"{neck?.name}\", not Base HumanNeck; only the head will turn");
         return new HeadTilt(body.transform, null, head);
     }
 

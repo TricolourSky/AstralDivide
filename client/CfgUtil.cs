@@ -33,19 +33,16 @@ internal static class CfgUtil
     internal const string SecMenu = "主菜单展示";
     internal const string SecDebug = "调试";
 
-    /// 37.29 第一版的组名（带序号），旧值从这里搬
-    internal static readonly string[] Numbered = { "1. 布料物理", "2. 布料调参台", "3. 本套微调", "4. 塔科夫光照换算", "5. 主菜单展示", "6. 调试" };
-
     private static readonly PropertyInfo OrphansProp = AccessTools.Property(typeof(ConfigFile), "OrphanedEntries");
+
+    /// 开发版才绑的菜单项：发布版里是 null，用固定值 def（Plugin 的主菜单两项、GF2Render 的光照换算都这么取）
+    internal static float Or(ConfigEntry<float> e, float def) => e != null ? e.Value : def;
 
     /// 说明 + 在组里的位置（数字大的排前面）+ 取值范围 + 显示名（不给 = 用键名）+ 是不是高级项
     internal static ConfigDescription Desc(string text, int order, AcceptableValueBase range = null, string name = null, bool advanced = false) =>
         new ConfigDescription(text, range, new ConfigurationManagerAttributes { Order = order, DispName = name, IsAdvanced = advanced ? true : (bool?)null });
 
-    /// 键名里的半角括号换成全角（显示用；键名本身不改，免得 cfg 里的值对不上）
-    internal static string Pretty(string key) => key.Replace("(", "（").Replace(")", "）");
-
-    /// 换了组 / 名字的项：cfg 里旧位置还留着值（BepInEx 叫孤儿项）就搬过来，旧的删掉
+    /// 换了组 / 名字的项：cfg 里旧位置还留着值（BepInEx 叫孤儿项）就搬过来，旧的删掉（一次性的，搬的时候记一行）
     internal static void Move(ConfigFile cfg, string oldSection, string oldKey, ConfigEntryBase entry)
     {
         Dictionary<ConfigDefinition, string> orphans = Orphans(cfg);
@@ -54,7 +51,7 @@ internal static class CfgUtil
             return;
         orphans.Remove(old);
         entry.SetSerializedValue(value);
-        Plugin.Log.LogInfo($"[配置] 「{oldSection} / {oldKey}」搬到「{entry.Definition.Section} / {entry.Definition.Key}」= {value}");
+        Plugin.Log.LogInfo($"[config] moved \"{oldSection} / {oldKey}\" to \"{entry.Definition.Section} / {entry.Definition.Key}\" = {value}");
     }
 
     /// 删掉 cfg 里不再用的旧项（孤儿项）；key 为 null 时整组删
@@ -72,6 +69,9 @@ internal static class CfgUtil
         OrphansProp?.GetValue(cfg, null) as Dictionary<ConfigDefinition, string>;
 
 #if SORA_DEV
+    /// 键名里的半角括号换成全角（显示用；键名本身不改，免得 cfg 里的值对不上）
+    internal static string Pretty(string key) => key.Replace("(", "（").Replace(")", "）");
+
     private static object _cm;
     private static PropertyInfo _cmWindow;
 

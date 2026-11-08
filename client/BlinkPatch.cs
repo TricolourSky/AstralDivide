@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using EFT;
 using EFT.HealthSystem;
 using EFT.Visual;
@@ -24,16 +23,16 @@ internal static class BlinkPatch
         {
             if (part.Key != EBodyModelPart.Head || Plugin.HeadlessDetected || PlayerGate.IconBodies.Contains(__instance))
                 return;
-            string path = part.Value?.path;
-            MmdModel model = string.IsNullOrEmpty(path) ? null : MmdRaw.For(Path.GetFileNameWithoutExtension(path));
-            if (model == null)
+            // 只给我们自己的头（有 <模型>_raw.json 的那几套）：原版的头每刷一个 bot 都会走到这里，不给它们挂组件
+            if (!SkinPart.TryGet(__instance, part, out string key, out LoddedSkin lodded))
                 return;
-            if (__instance.BodySkins.TryGetValue(part.Key, out LoddedSkin lodded) && lodded != null)
+            MmdModel model = MmdRaw.For(key);
+            if (model != null)
                 MmdBlink.Attach(lodded, model.Name);
         }
         catch (Exception e)
         {
-            Plugin.Log.LogError($"BlinkPatch 异常: {e}");
+            Plugin.Log.LogError($"BlinkPatch error: {e}");
         }
     }
 }
@@ -46,21 +45,18 @@ internal static class BlinkPatch
 /// </summary>
 internal sealed class MmdBlink : MonoBehaviour
 {
-    private const float GapMin = 2.5f, GapMax = 6f;
     private const float Close = 0.06f, Hold = 0.04f, Open = 0.10f;
     private const float DeathClose = 0.3f;
 
-    private readonly List<KeyValuePair<SkinnedMeshRenderer, int>> _targets = new List<KeyValuePair<SkinnedMeshRenderer, int>>();
+    private FaceMorphs _lid;             // 眨眼那一个形态键
     private Player _player;
     private float _nextLook;
     private float _nextBlink;
     private float _phase = -1f;          // 这一次眨眼进行到第几秒；-1 = 没在眨
     private float _weight;
-    private float _applied = -1f;
     private bool _dead;
     private MenuIdleFace _idle;
     private RaidFace _raid;
-    private string _shape = "まばたき";
 
     /// 眨眼用哪个形态键：一般是「まばたき」。阿斯缇亚（W / B）的模型里两个名字对调了（DEV_NOTES 37.27）：
     /// 「まばたき」只动左眼（392 个顶点，其实是左眼的笑眼单眨）、「ウィンク」才是双眼眨眼（左右各 370 个）
@@ -71,13 +67,14 @@ internal sealed class MmdBlink : MonoBehaviour
         MmdBlink blink = lodded.gameObject.GetComponent<MmdBlink>();
         if (blink == null)
             blink = lodded.gameObject.AddComponent<MmdBlink>();
-        blink._shape = BlinkShape(model);
-        if (!blink.Collect(lodded))
+        var lid = new FaceMorphs(lodded, new[] { BlinkShape(model) }, model, warnMissing: false);
+        if (!lid.Has(0))
         {
             Destroy(blink);
             return;
         }
-        blink._nextBlink = Time.time + UnityEngine.Random.Range(GapMin, GapMax);
+        blink._lid = lid;
+        blink._nextBlink = Time.time + UnityEngine.Random.Range(FaceBlink.GapMin, FaceBlink.GapMax);
         blink._idle = MenuIdleFace.Create(lodded, model);
         blink._raid?.Unbind();                               // 同一个头再挂一次：旧的先退订受伤事件
         blink._raid = RaidFace.Create(lodded, model);
@@ -89,27 +86,16 @@ internal sealed class MmdBlink : MonoBehaviour
         _raid?.Unbind();
     }
 
-    private bool Collect(LoddedSkin lodded)
-    {
-        _targets.Clear();
-        foreach (SkinnedMeshRenderer smr in lodded.GetComponentsInChildren<SkinnedMeshRenderer>(true))
-        {
-            Mesh mesh = smr.sharedMesh;
-            int index = mesh != null ? mesh.GetBlendShapeIndex(_shape) : -1;
-            if (index >= 0)
-                _targets.Add(new KeyValuePair<SkinnedMeshRenderer, int>(smr, index));
-        }
-        return _targets.Count > 0;
-    }
-
     private void Update()
     {
+        if (_lid == null)
+            return;                         // 刚加上就因为头上没有眨眼键被销毁的那一帧
         if (!_dead && IsDead())
             _dead = true;
         float scripted = -1f;
         IHealthController health = _player != null ? _player.HealthController : null;
         if (_raid != null && health != null)
-            scripted = _raid.Tick(health, _dead);           // 战局（OTs-14）：伤情表情 + 眨眼 + 死后闭眼都归它
+            scripted = _raid.Tick(health, _dead);           // 战局：伤情表情 + 眨眼 + 死后闭眼都归它
         else if (_idle != null && !_dead)
             scripted = _idle.Tick(this);
         if (scripted >= 0f)
@@ -118,19 +104,14 @@ internal sealed class MmdBlink : MonoBehaviour
             _weight = Mathf.MoveTowards(_weight, 100f, 100f / DeathClose * Time.deltaTime);
         else
             _weight = BlinkWeight(Time.deltaTime);
-        if (Mathf.Approximately(_weight, _applied))
-            return;
-        _applied = _weight;
-        foreach (KeyValuePair<SkinnedMeshRenderer, int> t in _targets)
-            if (t.Key != null)
-                t.Key.SetBlendShapeWeight(t.Value, _weight);
+        _lid.Set(0, _weight);
     }
 
     /// 挂机表情在播：「まばたき」用它给的值（它自己安排的两次眨眼，其余时间 0），随机眨眼的计时往后推（播完不会马上补眨一下）。
     private float Follow(float weight)
     {
         _phase = -1f;
-        _nextBlink = Time.time + UnityEngine.Random.Range(GapMin, GapMax);
+        _nextBlink = Time.time + UnityEngine.Random.Range(FaceBlink.GapMin, FaceBlink.GapMax);
         return weight;
     }
 
@@ -150,7 +131,7 @@ internal sealed class MmdBlink : MonoBehaviour
         if (_phase < Close + Hold + Open)
             return 100f * (1f - (_phase - Close - Hold) / Open);
         _phase = -1f;
-        _nextBlink = Time.time + UnityEngine.Random.Range(GapMin, GapMax);
+        _nextBlink = Time.time + UnityEngine.Random.Range(FaceBlink.GapMin, FaceBlink.GapMax);
         return 0f;
     }
 

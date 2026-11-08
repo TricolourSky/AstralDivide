@@ -108,6 +108,29 @@ internal class MmdFit
     /// Horn 的 4x4 对称矩阵，其最大特征向量就是所求旋转的四元数。用 Jacobi 求，确定性、不怕退化。
     private static Quaternion LargestEigenQuat(float[,] s)
     {
+        double[,] n = HornMatrix(s);
+        var v = new double[4, 4];
+        for (int i = 0; i < 4; i++)
+            v[i, i] = 1.0;
+        // 每一轮先看非对角元还剩多少，够小就停（写成 !(x < 阈值)：和以前一样，算出 NaN 时照样往下转）
+        for (int sweep = 0; sweep < 64 && !(OffDiagonal(n) < 1e-24); sweep++)
+            for (int p = 0; p < 4; p++)
+                for (int q = p + 1; q < 4; q++)
+                    if (!(System.Math.Abs(n[p, q]) < 1e-30))
+                        Rotate(n, v, p, q);
+
+        int best = 0;
+        for (int i = 1; i < 4; i++)
+            if (n[i, i] > n[best, best])
+                best = i;
+        var quat = new Quaternion((float)v[1, best], (float)v[2, best], (float)v[3, best], (float)v[0, best]);
+        float len = Mathf.Sqrt(quat.x * quat.x + quat.y * quat.y + quat.z * quat.z + quat.w * quat.w);
+        return len < 1e-6f ? Quaternion.identity : new Quaternion(quat.x / len, quat.y / len, quat.z / len, quat.w / len);
+    }
+
+    /// 相关矩阵 S → Horn 的 4x4 对称矩阵 N
+    private static double[,] HornMatrix(float[,] s)
+    {
         var n = new double[4, 4];
         double tr = s[0, 0] + s[1, 1] + s[2, 2];
         n[0, 0] = tr;
@@ -120,52 +143,41 @@ internal class MmdFit
         n[1, 2] = n[2, 1] = s[0, 1] + s[1, 0];
         n[1, 3] = n[3, 1] = s[2, 0] + s[0, 2];
         n[2, 3] = n[3, 2] = s[1, 2] + s[2, 1];
+        return n;
+    }
 
-        var v = new double[4, 4];
-        for (int i = 0; i < 4; i++)
-            v[i, i] = 1.0;
-        for (int sweep = 0; sweep < 64; sweep++)
+    /// 上三角非对角元的平方和（Jacobi 收敛判据）
+    private static double OffDiagonal(double[,] n)
+    {
+        double off = 0.0;
+        for (int p = 0; p < 4; p++)
+            for (int q = p + 1; q < 4; q++)
+                off += n[p, q] * n[p, q];
+        return off;
+    }
+
+    /// Jacobi 的一次旋转：把 n[p,q] 消成 0，同时转 n 的行列和特征向量 v
+    private static void Rotate(double[,] n, double[,] v, int p, int q)
+    {
+        double theta = (n[q, q] - n[p, p]) / (2.0 * n[p, q]);
+        double t = System.Math.Sign(theta) / (System.Math.Abs(theta) + System.Math.Sqrt(theta * theta + 1.0));
+        if (theta == 0.0)
+            t = 1.0;
+        double c = 1.0 / System.Math.Sqrt(t * t + 1.0), sn = t * c;
+        for (int k = 0; k < 4; k++)
         {
-            double off = 0.0;
-            for (int p = 0; p < 4; p++)
-                for (int q = p + 1; q < 4; q++)
-                    off += n[p, q] * n[p, q];
-            if (off < 1e-24)
-                break;
-            for (int p = 0; p < 4; p++)
-                for (int q = p + 1; q < 4; q++)
-                {
-                    if (System.Math.Abs(n[p, q]) < 1e-30)
-                        continue;
-                    double theta = (n[q, q] - n[p, p]) / (2.0 * n[p, q]);
-                    double t = System.Math.Sign(theta) / (System.Math.Abs(theta) + System.Math.Sqrt(theta * theta + 1.0));
-                    if (theta == 0.0)
-                        t = 1.0;
-                    double c = 1.0 / System.Math.Sqrt(t * t + 1.0), sn = t * c;
-                    for (int k = 0; k < 4; k++)
-                    {
-                        double nkp = n[k, p], nkq = n[k, q];
-                        n[k, p] = c * nkp - sn * nkq;
-                        n[k, q] = sn * nkp + c * nkq;
-                    }
-                    for (int k = 0; k < 4; k++)
-                    {
-                        double npk = n[p, k], nqk = n[q, k];
-                        n[p, k] = c * npk - sn * nqk;
-                        n[q, k] = sn * npk + c * nqk;
-                        double vkp = v[k, p], vkq = v[k, q];
-                        v[k, p] = c * vkp - sn * vkq;
-                        v[k, q] = sn * vkp + c * vkq;
-                    }
-                }
+            double nkp = n[k, p], nkq = n[k, q];
+            n[k, p] = c * nkp - sn * nkq;
+            n[k, q] = sn * nkp + c * nkq;
         }
-
-        int best = 0;
-        for (int i = 1; i < 4; i++)
-            if (n[i, i] > n[best, best])
-                best = i;
-        var quat = new Quaternion((float)v[1, best], (float)v[2, best], (float)v[3, best], (float)v[0, best]);
-        float len = Mathf.Sqrt(quat.x * quat.x + quat.y * quat.y + quat.z * quat.z + quat.w * quat.w);
-        return len < 1e-6f ? Quaternion.identity : new Quaternion(quat.x / len, quat.y / len, quat.z / len, quat.w / len);
+        for (int k = 0; k < 4; k++)
+        {
+            double npk = n[p, k], nqk = n[q, k];
+            n[p, k] = c * npk - sn * nqk;
+            n[q, k] = sn * npk + c * nqk;
+            double vkp = v[k, p], vkq = v[k, q];
+            v[k, p] = c * vkp - sn * vkq;
+            v[k, q] = sn * vkp + c * vkq;
+        }
     }
 }

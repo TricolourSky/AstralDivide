@@ -49,9 +49,11 @@ internal sealed class SwayPart
         rootAngle = Mathf.Clamp(rootAngle, 0f, 170f);   // 再大就接近完全反过来，转动轴定不住、骨头会乱拧
     }
 
+#if SORA_DEV
     internal string Describe() =>
         $"带动 {follow:0.##} / 软硬 {hz:0.#}Hz / 阻尼比 {zeta:0.##} / 甩动 {inertia:0.##} / 摆角 {maxAngle:0}°"
         + (rootAngle > 0f ? $"（第一节 {rootAngle:0}°）" : "") + $" / 重力 {gravity:0.#}";
+#endif
 }
 
 /// <summary>
@@ -77,12 +79,11 @@ internal sealed class ClothSway
 
     // 内部手感常数（不进调参台；离线自检比过几组，DEV_NOTES 37.31）：
     // 不连相邻链时裙子会被拉开到 2.55 倍、挤到 0.43 倍，连上（0.75~1.35）实测 0.71~1.46；跟腿宽度 1.2 → 2 前片跟腿 0.52 → 0.59、下蹲裙根抬 54° → 60°
-    internal static float GapMin = 0.75f, GapMax = 1.35f;   // 相邻两条链同一节的间距只许在静止的这个倍数范围内
-    internal static float MaxTurnLag = 600f;                // 转身时每秒最多少带走多少度（甩动 × 转角，封顶）
-    internal static float Spread = 2f;                      // 跟腿的权重：横向偏开「大腿离中线距离 × 这个数」就降到 0
-    internal static int Iterations = 1;                     // 每一小步里「拉间距 → 推开 + 定长」做几遍（2 遍开销 +50%、穿模只少一点，不值）
-    // 碰撞按「整节骨（父 → 这节）」对胶囊算，不只算这一节的端点。自检比过：开销 +30%、穿模没少（阿斯缇亚长外套下蹲 26 → 33 mm），默认关
-    internal static bool SegmentHits = false;
+    private const float GapMin = 0.75f, GapMax = 1.35f;     // 相邻两条链同一节的间距只许在静止的这个倍数范围内
+    private const float MaxTurnLag = 600f;                  // 转身时每秒最多少带走多少度（甩动 × 转角，封顶）
+    private const float Spread = 2f;                        // 跟腿的权重：横向偏开「大腿离中线距离 × 这个数」就降到 0
+    // 自检比过、没采用的两个做法（2026-11-09 删了代码，记在这里）：每一小步里「拉间距 → 推开 + 定长」做 2 遍（开销 +50%、穿模只少一点）；
+    // 碰撞按「整节骨（父 → 这节）」对胶囊算、不只算这一节的端点（开销 +30%、穿模没少：阿斯缇亚长外套下蹲 26 → 33 mm）
 
     // 头发，和兽耳 / 尾巴（重力一压就塌：贝丝蒂的尾巴静站就被压到摆角上限，第二步之后的自检）→ 都照旧 PMX
     private static readonly Regex HairRx = new Regex(@"hair|bang|髪|もみあげ|アホ毛|ahoge|pony|braid|^ear_|耳|^tail|尻尾|しっぽ", RegexOptions.IgnoreCase);
@@ -143,8 +144,8 @@ internal sealed class ClothSway
         internal Vector3 Axis = Vector3.up;         // 胶囊轴（刚体局部）
         internal float Radius, Half;                // 米
         internal int Group, Mask;
-        internal Vector3 PmxCenter, PmxAxis;        // PMX 静止姿态（PMX 单位）
-        internal float PmxRadius, PmxHalf;
+        internal Vector3 PmxA, PmxB;                // PMX 静止姿态的两端（PMX 单位；中心 ± 轴 × 半长，建的时候算好）
+        internal float PmxRadius;
         internal Vector3 A, B;                      // 本帧世界端点
     }
 
@@ -194,6 +195,8 @@ internal sealed class ClothSway
 
     internal int Count => _chains.Count;
 
+#if SORA_DEV
+    /// 调参台那行「这套身上有几条」
     internal int CountKind(SwayKind kind)
     {
         int n = 0;
@@ -202,20 +205,7 @@ internal sealed class ClothSway
                 n++;
         return n;
     }
-    internal int PairCount => _pairs.Count;
-    internal int ColCount => _cols.Count;
-    internal bool LegsReady => _body != null && _body.Legs;
-
-    internal int BoneCount
-    {
-        get
-        {
-            int n = 0;
-            foreach (Chain c in _chains)
-                n += c.N;
-            return n;
-        }
-    }
+#endif
 
     internal void SetBody(Body body)
     {
@@ -228,15 +218,15 @@ internal sealed class ClothSway
     // ── 建 / 拆 ──────────────────────────────────────────────────────────
 
     /// 加一条链。骨必须还在静止姿态（刚嫁接完），这里直接从 Transform 上量原形。
-    /// 只有一节骨的链要带虚拟尖端（Input.Tail），不然没有「下一节」可追
-    internal bool Add(Input input)
+    /// 只有一节骨的链要带虚拟尖端（Input.Tail），不然没有「下一节」可追（没有就不加）
+    internal void Add(Input input)
     {
         Transform[] b = input.Bones;
         if (b == null || b.Length < 1 || input.Attach == null)
-            return false;
+            return;
         int n = b.Length, p = n + (input.Tail.sqrMagnitude > 1e-6f ? 1 : 0);
         if (p < 2)
-            return false;
+            return;
         var c = new Chain
         {
             In = input, N = n, P = p, RootLocalRot = b[0].localRotation, Drive = b[0].rotation, RootPos = b[0].position,
@@ -246,7 +236,7 @@ internal sealed class ClothSway
         for (int i = 0; i < n; i++)
         {
             if (b[i] == null)
-                return false;
+                return;
             c.LocalPos[i] = b[i].localPosition;
             c.LocalRot[i] = b[i].localRotation;
             c.Rot[i] = b[i].rotation;
@@ -268,7 +258,6 @@ internal sealed class ClothSway
             c.Home[i] = toAttach * (c.X[i] - input.Attach.position);
         }
         _chains.Add(c);
-        return true;
     }
 
     internal void RemoveOwner(int owner)
@@ -331,16 +320,10 @@ internal sealed class ClothSway
                 float r = col.PmxRadius + rp;
                 Vector3 q = c.In.PmxPos != null && i < c.In.PmxPos.Length ? c.In.PmxPos[i] : Vector3.positiveInfinity;
                 Vector3 q0 = i > 0 && c.In.PmxPos != null && i - 1 < c.In.PmxPos.Length ? c.In.PmxPos[i - 1] : q;
-                if (!float.IsInfinity(q.x) && !float.IsInfinity(q0.x))
+                if (!float.IsInfinity(q.x) && !float.IsInfinity(q0.x))       // 这节和上一节在 PMX 里都找得到才收（和以前一样）
                 {
-                    // 静止时和它的距离：按整节骨算（和 Collide 用同一种量法），不然整节横穿胖胶囊的那几节一开始就被顶歪
-                    Vector3 ea = col.PmxCenter + col.PmxAxis * col.PmxHalf, eb = col.PmxCenter - col.PmxAxis * col.PmxHalf;
-                    float d = Dist(q, ea, eb);
-                    if (SegmentHits && i > 0)
-                    {
-                        Closest(q0, q, ea, eb, out float _, out Vector3 onSeg, out Vector3 onAxis);
-                        d = (onSeg - onAxis).magnitude;
-                    }
+                    // 静止时这一节离胶囊的距离（和 Collide 用同一种量法）
+                    float d = Dist(q, col.PmxA, col.PmxB);
                     if (d < r)
                         r = Mathf.Max(0f, d - 0.001f * _upm);
                 }
@@ -356,7 +339,7 @@ internal sealed class ClothSway
             return true;
         float far = (FarCull + col.Radius) * _upm;
         foreach (Vector3 q in c.In.PmxPos)
-            if (!float.IsInfinity(q.x) && Dist(q, col.PmxCenter + col.PmxAxis * col.PmxHalf, col.PmxCenter - col.PmxAxis * col.PmxHalf) < far)
+            if (!float.IsInfinity(q.x) && Dist(q, col.PmxA, col.PmxB) < far)
                 return true;
         return false;
     }
@@ -458,13 +441,10 @@ internal sealed class ClothSway
                 Step(c, h);
             // 推开放在最后：先拉相邻间距、再统一推出身体 + 定长。推开放在前面的话，拉间距会把被腿推出去的那列连同邻居拽回腿里
             //（第二步自检：阿斯缇亚下蹲穿 3.5~5.2 cm）
-            for (int it = 0; it < Iterations; it++)
-            {
-                foreach (Pair p in _pairs)
-                    Keep(p);
-                foreach (Chain c in _chains)
-                    Settle(c, h);
-            }
+            foreach (Pair p in _pairs)
+                Keep(p);
+            foreach (Chain c in _chains)
+                Settle(c, h);
         }
         foreach (Chain c in _chains)
             Pose(c);
@@ -570,14 +550,35 @@ internal sealed class ClothSway
         }
     }
 
+    /// 限角用的角度（本部位的 maxAngle、第一节的 rootAngle）：Step 和 Settle 共用，每条链每一小步算一次
+    private readonly struct Limits
+    {
+        private readonly float _cosMax, _maxRad, _cosRoot, _rootRad;
+
+        internal Limits(SwayPart p)
+        {
+            _maxRad = p.maxAngle * Mathf.Deg2Rad;
+            _cosMax = Mathf.Cos(_maxRad);
+            _rootRad = p.RootAngle * Mathf.Deg2Rad;
+            _cosRoot = Mathf.Cos(_rootRad);
+        }
+
+        /// 限角：dir 偏离原形方向 tdir 太多就拉回到边上。第一节相对挂点用 rootAngle（带子挂在环上，37.31），后面每节相对上一节用 maxAngle
+        internal Vector3 Cone(int i, Vector3 dir, Vector3 tdir)
+        {
+            float cosMax = i == 1 ? _cosRoot : _cosMax, maxRad = i == 1 ? _rootRad : _maxRad;
+            return Vector3.Dot(dir, tdir) < cosMax ? Vector3.RotateTowards(tdir, dir, maxRad, 0f) : dir;
+        }
+    }
+
     /// 跟随层 + 保护层：一节一节往下，弹簧追「父骨朝向下的原形位置」，再限角、推开、定长
     private void Step(Chain c, float h)
     {
         if (c.In.Attach == null || c.In.Bones[0] == null)
             return;                                         // 骨已经跟着换装拆掉了，等 RemovePart 把这条链摘掉
         SwayPart p = _part(c.In.Kind);
-        float w0 = 2f * Mathf.PI * p.hz, cosMax = Mathf.Cos(p.maxAngle * Mathf.Deg2Rad), maxRad = p.maxAngle * Mathf.Deg2Rad;
-        float rootRad = p.RootAngle * Mathf.Deg2Rad, cosRoot = Mathf.Cos(rootRad);
+        var lim = new Limits(p);
+        float w0 = 2f * Mathf.PI * p.hz;
         Vector3 g = Vector3.down * p.gravity;
         Vector3 pPos = c.RootPos;
         Quaternion pBase = c.Drive;
@@ -590,19 +591,14 @@ internal sealed class ClothSway
             // 隐式欧拉（弹簧 + 阻尼一起隐式）：步长、频率拖到多大都不会发散
             Vector3 v = (c.V[i] + (w * w * (target - x) + g) * h) / (1f + 2f * p.zeta * w * h + w * w * h * h);
             Vector3 tdir = (target - pPos) / len;
-            Vector3 dir = Dir(x + v * h - pPos, tdir);
-            dir = i == 1 ? Cone(dir, tdir, cosRoot, rootRad) : Cone(dir, tdir, cosMax, maxRad);
+            Vector3 dir = lim.Cone(i, Dir(x + v * h - pPos, tdir), tdir);
             Vector3 xn = pPos + dir * len;                  // 推出身体在步末的 Settle 里统一做（只做一遍，省一半碰撞测试）
             c.V[i] = (xn - x) / h;
             c.X[i] = xn;
-            Quaternion fin = Quaternion.FromToRotation(tdir, dir) * pBase;
-            c.Rot[i - 1] = fin;
-            if (i < c.N)
-                pBase = fin * c.LocalRot[i];                // 虚拟尖端后面没有骨了
+            pBase = Advance(c, i, tdir, dir, pBase);
             pPos = xn;
         }
-        if (c.P == c.N)
-            c.Rot[c.N - 1] = pBase;                         // 最后一根骨（梢）没有下一节可指：跟父骨的原形走
+        Tip(c, pBase);
     }
 
     /// <summary>
@@ -615,39 +611,42 @@ internal sealed class ClothSway
     {
         if (c.In.Attach == null || c.In.Bones[0] == null)
             return;
-        SwayPart p = _part(c.In.Kind);
-        float cosMax = Mathf.Cos(p.maxAngle * Mathf.Deg2Rad), maxRad = p.maxAngle * Mathf.Deg2Rad;
-        float rootRad = p.RootAngle * Mathf.Deg2Rad, cosRoot = Mathf.Cos(rootRad);
+        var lim = new Limits(_part(c.In.Kind));
         Vector3 pPos = c.RootPos;
         Quaternion pBase = c.Drive;
         for (int i = 1; i < c.P; i++)
         {
             float len = c.Len[i];
             Vector3 tdir = pBase * c.Off[i] / len;
-            Vector3 dir = Dir(c.X[i] - pPos, tdir);
-            dir = i == 1 ? Cone(dir, tdir, cosRoot, rootRad) : Cone(dir, tdir, cosMax, maxRad);
-            Vector3 x = Collide(c, i, pPos, pPos + dir * len);
+            Vector3 dir = lim.Cone(i, Dir(c.X[i] - pPos, tdir), tdir);
+            Vector3 x = Collide(c, i, pPos + dir * len);
             dir = Dir(x - pPos, tdir);
             x = pPos + dir * len;
             c.X[i] = x;
             c.V[i] = (x - c.Prev[i]) / h;
-            Quaternion fin = Quaternion.FromToRotation(tdir, dir) * pBase;
-            c.Rot[i - 1] = fin;
-            if (i < c.N)
-                pBase = fin * c.LocalRot[i];
+            pBase = Advance(c, i, tdir, dir, pBase);
             pPos = x;
         }
+        Tip(c, pBase);
+    }
+
+    /// 第 i 节的方向定好之后：这节骨的朝向 = 从原形方向转到 dir、扭转取自父骨；返回下一节的父朝向（虚拟尖端后面没有骨了，原样返回）
+    private static Quaternion Advance(Chain c, int i, Vector3 tdir, Vector3 dir, Quaternion pBase)
+    {
+        Quaternion fin = Quaternion.FromToRotation(tdir, dir) * pBase;
+        c.Rot[i - 1] = fin;
+        return i < c.N ? fin * c.LocalRot[i] : pBase;
+    }
+
+    /// 最后一根骨（梢）没有下一节可指：跟父骨的原形走（带虚拟尖端的链，梢的朝向已经由尖端定了）
+    private static void Tip(Chain c, Quaternion pBase)
+    {
         if (c.P == c.N)
             c.Rot[c.N - 1] = pBase;
     }
 
-    /// 限角：dir 偏离原形方向 tdir 超过 maxRad 就拉回到边上。第一节相对挂点用 rootAngle（带子挂在环上，37.31），后面每节相对上一节用 maxAngle
-    private static Vector3 Cone(Vector3 dir, Vector3 tdir, float cosMax, float maxRad) =>
-        Vector3.Dot(dir, tdir) < cosMax ? Vector3.RotateTowards(tdir, dir, maxRad, 0f) : dir;
-
-    /// 把第 i 节推出身体胶囊。SegmentHits 开：按整节骨（父 → 这节）和胶囊轴的最近点算，只能挪这一节的端点，
-    /// 所以推的量按最近点在骨上的位置放大（最近点离父骨越近要挪得越多，最多 4 倍）
-    private Vector3 Collide(Chain c, int i, Vector3 from, Vector3 x)
+    /// 把第 i 节推出身体胶囊（这一帧够得着的那些，按每节的有效半径）
+    private Vector3 Collide(Chain c, int i, Vector3 x)
     {
         float[] radii = c.ColR[i];
         for (int a = 0; a < c.ActiveCount; a++)
@@ -657,58 +656,14 @@ internal sealed class ClothSway
             float r = radii[k];
             if (r <= 0f || float.IsInfinity(col.A.x))
                 continue;
-            float s = 1f;
-            Vector3 cp, off;
-            if (SegmentHits)
-            {
-                Closest(from, x, col.A, col.B, out s, out Vector3 onSeg, out cp);
-                off = onSeg - cp;
-            }
-            else
-            {
-                Vector3 ab = col.B - col.A;
-                cp = col.A + ab * Mathf.Clamp01(Vector3.Dot(x - col.A, ab) / Mathf.Max(1e-8f, ab.sqrMagnitude));
-                off = x - cp;
-            }
+            Vector3 off = x - OnSegment(x, col.A, col.B);
             float dd = off.sqrMagnitude;
             if (dd >= r * r || dd < 1e-12f)
                 continue;
             float d = Mathf.Sqrt(dd);
-            x += off * ((r - d) / d / Mathf.Max(0.25f, s));
+            x += off * ((r - d) / d);
         }
         return x;
-    }
-
-    /// 两条线段的最近点（Ericson《实时碰撞检测》5.1.9）：骨 p0→p1 上参数 s 处的 onSeg，和胶囊轴 a→b 上的 onAxis
-    private static void Closest(Vector3 p0, Vector3 p1, Vector3 a, Vector3 b, out float s, out Vector3 onSeg, out Vector3 onAxis)
-    {
-        Vector3 u = p1 - p0, v = b - a, r = p0 - a;
-        float uu = Vector3.Dot(u, u), vv = Vector3.Dot(v, v), vr = Vector3.Dot(v, r);
-        float t;
-        if (uu <= 1e-10f)
-        {
-            s = 0f;
-            t = vv <= 1e-10f ? 0f : Mathf.Clamp01(vr / vv);
-        }
-        else
-        {
-            float ur = Vector3.Dot(u, r);
-            if (vv <= 1e-10f)
-            {
-                t = 0f;
-                s = Mathf.Clamp01(-ur / uu);
-            }
-            else
-            {
-                float uv = Vector3.Dot(u, v), denom = uu * vv - uv * uv;
-                s = denom > 1e-10f ? Mathf.Clamp01((uv * vr - ur * vv) / denom) : 0f;
-                t = (uv * s + vr) / vv;
-                if (t < 0f) { t = 0f; s = Mathf.Clamp01(-ur / uu); }
-                else if (t > 1f) { t = 1f; s = Mathf.Clamp01((uv - ur) / uu); }
-            }
-        }
-        onSeg = p0 + u * s;
-        onAxis = a + v * t;
     }
 
     /// 相邻两条链同一节的间距保持在静止的 GapMin~GapMax 倍（两边各让一半）
@@ -750,10 +705,12 @@ internal sealed class ClothSway
         return m > 1e-6f ? v / m : fallback;
     }
 
-    private static float Dist(Vector3 q, Vector3 a, Vector3 b)
+    /// 线段 a→b 上离 q 最近的点（Collide 和 Dist 共用）
+    private static Vector3 OnSegment(Vector3 q, Vector3 a, Vector3 b)
     {
         Vector3 ab = b - a;
-        float t = Mathf.Clamp01(Vector3.Dot(q - a, ab) / Mathf.Max(1e-8f, ab.sqrMagnitude));
-        return (q - (a + ab * t)).magnitude;
+        return a + ab * Mathf.Clamp01(Vector3.Dot(q - a, ab) / Mathf.Max(1e-8f, ab.sqrMagnitude));
     }
+
+    private static float Dist(Vector3 q, Vector3 a, Vector3 b) => (q - OnSegment(q, a, b)).magnitude;
 }
